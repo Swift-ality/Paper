@@ -40,6 +40,7 @@ public final class SwiftTestFunctions implements TestFunctionLoader {
         register.accept(key("selector_world_scan_matrix"), SwiftSelectorTests::matrix);
         register.accept(key("selector_index_differential"), SwiftSelectorDifferentialTests::differential);
         register.accept(key("bench_world_selector"), SwiftSelectorBenchmark::bench);
+        register.accept(key("selector_tag_matrix"), SwiftTagSelectorTests::matrix);
     }
 
     // Hopper above a chest pulls a dropped item and pushes it down. Guards hopper / item-entity optimisations.
