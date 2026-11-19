@@ -24,6 +24,46 @@ Lower value / already covered: random ticks (Paper's `optimiseRandomTick` alread
 search; L 5.0 is mostly the work itself), entity tracker and collisions (Moonrise), `SynchedEntityData#get`
 (G 4.7, but 84 % is `isAlive` from selector scans, which 0037/0038 now shrink).
 
+## Deep dive: candidate 1 (brain behaviour launching)
+
+Profile breakdown of `Brain#startEachNonRunningBehavior` (ms/tick):
+
+| Part | q (1.21.11) | G (26.3) | L (26.2) |
+|------|-------------|----------|----------|
+| total | 2.71 | 4.00 | 2.15 |
+| `OneShot#tryStart` (declarative behaviours) | 1.16 | 2.2 (two frame groups) | most |
+| of which `AcquirePoi` (bed / job / meeting search) | 0.25 | 1.42 | 0.16 (POI part) |
+| of which `PoiCompetitorScan` | 0.58 | 0.12 | small |
+| `Behavior#tryStart` (classic behaviours) | 0.25 | 0.34 | 0.35 |
+| of which `hasRequiredMemories` | 0.07 | 0.12 | small |
+| nested map/set iteration overhead | ~0.5 | ~0.4 | ~0.4 |
+
+**The original idea (skip memory checks while memories are unchanged) is worth only ~0.1 ms:** memory
+checks are cheap. The cost is POI work done by the behaviours that pass their checks, plus iteration.
+
+Refined, all exact:
+
+| Item | What | Evidence | Exactness |
+|------|------|----------|-----------|
+| A | POI search `seen` set: `PoiAccess#findNearestPoiRecords` allocates a `LongOpenHashSet` per search and grows it to ~1000+ section keys (`add` + `rehash` = 0.22-0.37 ms on G). Replace with a reused bit array over the search box (+1 margin). | G 0.2-0.4 | Same BFS, same queue order, same results. Mechanical. |
+| B | `AcquirePoi` negative-result cache: searches (every 20-40 ticks per villager, 48 blocks) almost never lead to a path (`findPathToPois` 0.03 ms), i.e. they find nothing usable, typical of trading halls without beds. Remember "found nothing from block X" per behaviour instance, valid while no POI in the searched chunks changed (per-chunk POI change counters: add/remove/ticket take/release). | G ~1.0 of 1.42 | Scheduling RNG (`nextInt(20)`) still runs; only the search result is reused, and only when every input of the search is unchanged. Skipping the search also skips its POI-data loading, which has no gameplay effect. |
+| C | Remote job-site reloads: `PoiCompetitorScan` calls `PoiManager#getType(jobSite)` every tick; when the job site's chunk has no loaded POI data, Moonrise's `loadPoiChunk` adds a ticket, **parks the main thread on a disk read**, and drops the ticket right away, so the next tick reads from disk again. Keep such POI chunks loaded for a while (timed ticket). | q 0.54, all of it the blocking load | The data read is identical; keeping it in memory changes nothing observable (blocks in unloaded chunks cannot change). Check memory use and save ordering. |
+| D | Flatten behaviour iteration: replace the TreeMap -> Map<Activity,Set> -> Set walk with a precomputed array per (behaviour set, active activities) in the same order, rebuilt when either changes. | ~0.3-0.5 everywhere | Same visiting order by construction. |
+| E | Cache Paper's `tickRates.behavior` lookup (a Guava `HashBasedTable#get` per behaviour per tick) per behaviour instance and config reload. | 0.04 | Same value. |
+| F | (original idea) skip `hasRequiredMemories` while memory presence is unchanged. | ~0.1 | Pure function of presence; lowest priority. |
+
+Order: A (mechanical, quick win) -> D -> C -> B (most gain on villager-heavy servers, most care) -> E/F.
+
+Tests to write first (green on current code), using fake players where a player is involved:
+- villager claims a bed within range; villager without a bed never claims one; **bed placed later is
+  claimed** (the invalidation case for B); bed removed while claimed.
+- unemployed villager + workstation becomes employed; two villagers, one workstation: exactly one keeps
+  it (PoiCompetitorScan); workstation broken -> job lost.
+- job site in an unloaded chunk: `getType` result unchanged across ticks (C).
+- POI search differential (A, B): run old and new search side by side on random POI layouts and
+  positions; identical result lists in identical order.
+- shadow-verify run (below) over the whole suite with every item enabled.
+
 ## Method addition: shadow-verify mode
 
 For every cache or skip, add a verify switch (e.g. `-Dswift.verify=true`) that runs both the fast
