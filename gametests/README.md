@@ -7,6 +7,7 @@ vanilla behaviour down so an optimisation that changes it fails the build.
 ./gradlew :paper-server:runGameTests                      # all tests (selector *:*)
 ./gradlew :paper-server:runGameTests -PgameTests=swift:hopper*
 ./gradlew :paper-server:runGameTests -PgameTestKeepWorld=true
+./gradlew :paper-server:runGameTests -PgameTestJvmArgs="-Dswift.nbtKeyFilter=false"   # suite with a change switched off
 ```
 
 The task boots a real Paper server (full CraftBukkit) from the dev classpath in
@@ -38,8 +39,10 @@ Block-based test (build it in game): in `./gradlew :paper-server:runDevServer`, 
 `packs/swift-parity/data/swift/structure/` and give its test instance
 `"type": "minecraft:block_based"`.
 
-`swift:default` freezes time and weather and disables mob spawning, so results don't
-depend on the clock. Write every test against the unmodified code first: it has
+`swift:default` freezes time at midnight (`clock_time` 18000), clears the weather and
+disables mob spawning, so results don't depend on the clock. Midnight matters: in a
+daytime world an unhelmeted zombie catches fire on a random roll each tick, which
+made a Health check fail about 1 run in 13. Write every test against the unmodified code first: it has
 to pass before your change and after it.
 
 Gotchas found while building this:
@@ -47,3 +50,8 @@ Gotchas found while building this:
   powers nothing sideways; start from the cross state (see `redstone_dust_lights_lamp`).
 - 26.x structure NBT palettes use `id`, not `Name`.
 - 26.3 entity types live in `EntityTypes`, not `EntityType`.
+- 26.3 inline predicates: `{type:"minecraft:entity_properties",entity:"this",predicate:{nbt:{...}}}`
+  (`type`, not `condition`; entity predicates are a map of sub-predicates).
+- Player saves contain wall-clock fields (`bukkit.lastPlayed`, `Paper.LastSeen`) that differ
+  between any two saves; mask them when comparing saves.
+- Test commands print to the server log (not suppressed) so a malformed command shows up.

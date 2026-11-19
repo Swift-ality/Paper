@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 20:25:55 +0100
+Subject: [PATCH] Swift: Only serialise requested keys for nbt matching
+
+nbt= selectors and entity nbt predicates serialised the whole entity for
+every check (players: full Inventory and EnderItems) and then did a partial
+compare that only reads the pattern's top-level keys. Save through an
+output that only encodes those keys; the entity's save code still runs in
+full, so the result is identical. See io.papermc.paper.swift.nbt.SwiftEntityNbt.
+
+Profile qJwhW316qQ (35 players): nbt= selectors on players cost ~7 ms/tick.
+Benchmark (full inventory player): 52 us -> 2.7 us per check.
+Disable with -Dswift.nbtKeyFilter=false.
+
+diff --git a/net/minecraft/advancements/predicates/NbtPredicate.java b/net/minecraft/advancements/predicates/NbtPredicate.java
+index fe1fb1e3773e3efe7f228275b8753981db7cfa7a..24dace4b193f39c990905035ce3c4fd435ae9c97 100644
+--- a/net/minecraft/advancements/predicates/NbtPredicate.java
++++ b/net/minecraft/advancements/predicates/NbtPredicate.java
+@@ -32,6 +32,11 @@ public record NbtPredicate(CompoundTag tag) {
+     }
+ 
+     public boolean matches(final Entity entity) {
++        // Swift start - only serialise requested keys for nbt matching
++        if (io.papermc.paper.swift.nbt.SwiftEntityNbt.ENABLED) {
++            return this.matches(io.papermc.paper.swift.nbt.SwiftEntityNbt.filteredTag(entity, this.tag.keySet(), true));
++        }
++        // Swift end - only serialise requested keys for nbt matching
+         return this.matches(getEntityTagToCompare(entity));
+     }
+ 
+diff --git a/net/minecraft/advancements/predicates/entity/EntityNbtPredicate.java b/net/minecraft/advancements/predicates/entity/EntityNbtPredicate.java
+index c25cbb8a798e244776c012877b9c6625f43104b3..fce41ac13127171b549d34597cca40ca80ee7ad8 100644
+--- a/net/minecraft/advancements/predicates/entity/EntityNbtPredicate.java
++++ b/net/minecraft/advancements/predicates/entity/EntityNbtPredicate.java
+@@ -12,6 +12,6 @@ public record EntityNbtPredicate(NbtPredicate nbt) implements EntitySubPredicate
+ 
+     @Override
+     public boolean matches(final Entity entity, final ServerLevel level, final @Nullable Vec3 position) {
+-        return this.nbt.matches(NbtPredicate.getEntityTagToCompare(entity));
++        return this.nbt.matches(entity); // Swift - only serialise requested keys for nbt matching
+     }
+ }
+diff --git a/net/minecraft/commands/arguments/selector/options/EntitySelectorOptions.java b/net/minecraft/commands/arguments/selector/options/EntitySelectorOptions.java
+index 0897a2c1538f0cb572848c6ef7d0edfb172e2dea..56955ce3058d0c976f9781aa7db782fa280cb29e 100644
+--- a/net/minecraft/commands/arguments/selector/options/EntitySelectorOptions.java
++++ b/net/minecraft/commands/arguments/selector/options/EntitySelectorOptions.java
+@@ -326,7 +326,13 @@ public class EntitySelectorOptions {
+             register("nbt", parser -> {
+                 boolean inverted = parser.shouldInvertValue();
+                 CompoundTag tag = TagParser.parseCompoundAsArgument(parser.getReader());
++                java.util.Set<String> swiftKeys = java.util.Set.copyOf(tag.keySet()); // Swift - only serialise requested keys for nbt matching
+                 parser.addPredicate(e -> {
++                    // Swift start - only serialise requested keys for nbt matching
++                    if (io.papermc.paper.swift.nbt.SwiftEntityNbt.ENABLED) {
++                        return NbtUtils.compareNbt(tag, io.papermc.paper.swift.nbt.SwiftEntityNbt.filteredTag(e, swiftKeys, e instanceof ServerPlayer), true) != inverted;
++                    }
++                    // Swift end - only serialise requested keys for nbt matching
+                     try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(e.problemPath(), LOGGER)) {
+                         TagValueOutput output = TagValueOutput.createWithContext(reporter, e.registryAccess());
+                         e.saveWithoutId(output);

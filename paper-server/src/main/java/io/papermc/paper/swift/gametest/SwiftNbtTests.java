@@ -105,6 +105,11 @@ final class SwiftNbtTests {
                 check(helper, "predicate " + c[0], c[1], failures);
             }
             if (!failures.isEmpty()) {
+                for (final var e : java.util.List.of(named, mount)) { // state of the test mobs, to tell a setup problem from a matching bug
+                    failures.append("\n  [state] ").append(e.getCustomName() == null ? "mount" : "named").append(" health=").append(e.getHealth())
+                        .append(" fireTicks=").append(e.getRemainingFireTicks()).append(" lastDamage=")
+                        .append(e.getLastDamageSource() == null ? "none" : e.getLastDamageSource().getMsgId()).append(" removed=").append(e.isRemoved());
+                }
                 helper.fail(Component.literal("nbt matrix mismatches:" + failures));
             } else {
                 helper.succeed();

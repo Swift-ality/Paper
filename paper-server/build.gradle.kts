@@ -365,6 +365,7 @@ fill {
 
 // Swift start - gameplay-parity tests (vanilla GameTest framework inside a real Paper server)
 // ./gradlew :paper-server:runGameTests [-PgameTests=swift:*] [-PgameTestPacks=<dir of datapacks>] [-PgameTestKeepWorld=true]
+//                                     [-PgameTestJvmArgs="-Dswift.nbtKeyFilter=false"]
 // Fresh flat world in paper-server/build/gametest/run, test datapacks copied into world/datapacks, JUnit XML at
 // paper-server/build/gametest/report.xml. Exit code = failed required tests, so the task fails when gameplay changed.
 tasks.register<JavaExec>("runGameTests") {
@@ -395,6 +396,8 @@ tasks.register<JavaExec>("runGameTests") {
         }
     }
     args("--nogui", "--noconsole")
+    // extra JVM flags for the test server, e.g. -PgameTestJvmArgs="-Dswift.nbtKeyFilter=false"
+    providers.gradleProperty("gameTestJvmArgs").orNull?.split(" ")?.filter { it.isNotBlank() }?.let { jvmArgs(it) }
     val packs = providers.gradleProperty("gameTestPacks").orElse(rootProject.layout.projectDirectory.dir("gametests/packs").asFile.absolutePath)
     val runDirFile = runDir.get().asFile
     val keepWorld = providers.gradleProperty("gameTestKeepWorld").map { it.toBoolean() }.getOrElse(false)
