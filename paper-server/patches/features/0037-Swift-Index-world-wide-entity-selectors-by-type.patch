@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 20:52:15 +0100
+Subject: [PATCH] Swift: Index world-wide entity selectors by type
+
+World-wide @e selectors walked every entity in the id table and type-checked
+each one. Snapshot the table's exact iteration order per entity type
+(rebuilt only after the table changes, and only once a second scan needs
+it), so type= selectors visit only their type in the same order and
+untyped ones walk an array. Visibility is still checked live. See
+io.papermc.paper.swift.entity.SelectorEntityIndex.
+
+Profile qJwhW316qQ: world-wide selector scans ~5 ms/tick.
+Benchmark (~3000 entities): @e[type=zombie] 23.9 -> 2.1 us.
+Disable with -Dswift.selectorIndex=false.
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+index 99b5026d8dfa9668caf15e9ae27619d9d433b441..2e260d0918a495df890603a9b714c37ae0fb5afc 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+@@ -214,6 +214,34 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         }
+     }
+ 
++    // Swift start - selector entity index
++    public final io.papermc.paper.swift.entity.SelectorEntityIndex swift$selectorIndex = new io.papermc.paper.swift.entity.SelectorEntityIndex();
++
++    /**
++     * Same visits, in the same order, as {@link #get(EntityTypeTest, AbortableIterationConsumer)}; used by world-wide
++     * entity selectors only. See {@link io.papermc.paper.swift.entity.SelectorEntityIndex}.
++     */
++    public <U extends Entity> void swift$getForSelector(final EntityTypeTest<Entity, U> filter, final AbortableIterationConsumer<U> action) {
++        final Entity[] candidates = this.swift$selectorIndex.candidates(filter, this.entityById::valueIterator);
++        if (candidates == null) {
++            this.get(filter, action);
++            return;
++        }
++        final int modCount = this.swift$selectorIndex.modCount();
++        for (final Entity entity : candidates) {
++            final Visibility visibility = EntityLookup.getEntityStatus(entity);
++            if (!visibility.isAccessible()) {
++                continue;
++            }
++            final U casted = filter.tryCast(entity);
++            if (casted != null && action.accept(casted).shouldAbort()) {
++                break;
++            }
++        }
++        this.swift$selectorIndex.checkUnmodifiedSince(modCount);
++    }
++    // Swift end - selector entity index
++
+     @Override
+     public void get(final AABB box, final Consumer<Entity> action) {
+         List<Entity> entities = new ArrayList<>();
+@@ -427,6 +455,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         }
+ 
+         Entity currentlyMapped = this.entityById.putIfAbsent(entity.getId(), entity);
++        this.swift$selectorIndex.modified(); // Swift - selector entity index
+         if (currentlyMapped != null) {
+             LOGGER.warn("Entity id already exists: " + entity.getId() + ", mapped to " + currentlyMapped + ", can't add " + entity);
+             return false;
+@@ -436,6 +465,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         if (currentlyMapped != null) {
+             // need to remove mapping for id
+             this.entityById.remove(entity.getId(), entity);
++            this.swift$selectorIndex.modified(); // Swift - selector entity index
+             LOGGER.warn("Entity uuid already exists: " + entity.getUUID() + ", mapped to " + currentlyMapped + ", can't add " + entity);
+             return false;
+         }
+@@ -494,7 +524,9 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+ 
+         Entity currentlyMapped;
+-        if ((currentlyMapped = this.entityById.remove(entity.getId(), entity)) != entity) {
++        currentlyMapped = this.entityById.remove(entity.getId(), entity); // Swift - selector entity index
++        this.swift$selectorIndex.modified(); // Swift - selector entity index
++        if (currentlyMapped != entity) { // Swift - selector entity index
+             LOGGER.warn("Failed to remove entity " + entity + " by id, current entity mapped: " + currentlyMapped);
+         }
+ 
+diff --git a/net/minecraft/commands/arguments/selector/EntitySelector.java b/net/minecraft/commands/arguments/selector/EntitySelector.java
+index 6c05b9276bdc267a36376f6c64592a50e4b2b36e..4bd53ab5781368cdecec76408921ed3334488355 100644
+--- a/net/minecraft/commands/arguments/selector/EntitySelector.java
++++ b/net/minecraft/commands/arguments/selector/EntitySelector.java
+@@ -187,7 +187,7 @@ public class EntitySelector {
+             if (absoluteAABB != null) {
+                 level.getEntities(this.type, absoluteAABB, predicate, result, limit);
+             } else {
+-                level.getEntities(this.type, predicate, result, limit);
++                level.swift$getEntitiesForSelector(this.type, predicate, result, limit); // Swift - selector entity index
+             }
+         }
+     }
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 78a90480c02a09c63b745c3dd0c9159509532193..630918efb9b72a11545f7ab293d517a5b3acefd9 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1548,6 +1548,24 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         });
+     }
+ 
++    // Swift start - selector entity index
++    /** {@link #getEntities(EntityTypeTest, Predicate, List, int)} for world-wide entity selectors: same results, same order. */
++    public <T extends Entity> void swift$getEntitiesForSelector(
++        final EntityTypeTest<Entity, T> type, final Predicate<? super T> selector, final List<? super T> result, final int maxResults
++    ) {
++        this.moonrise$getEntityLookup().swift$getForSelector(type, entity -> {
++            if (selector.test(entity)) {
++                result.add(entity);
++                if (result.size() >= maxResults) {
++                    return Continuation.ABORT;
++                }
++            }
++
++            return Continuation.CONTINUE;
++        });
++    }
++    // Swift end - selector entity index
++
+     public List<? extends EnderDragon> getDragons() {
+         return this.getEntities(EntityTypes.ENDER_DRAGON, LivingEntity::isAlive);
+     }

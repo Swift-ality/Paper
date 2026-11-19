@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:selector_index_differential",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 200,
+  "setup_ticks": 0,
+  "required": true
+}
