@@ -34,6 +34,7 @@ public final class SwiftTestFunctions implements TestFunctionLoader {
         register.accept(key("hopper_moves_item_into_chest"), SwiftTestFunctions::hopperMovesItemIntoChest);
         register.accept(key("redstone_dust_lights_lamp"), SwiftTestFunctions::redstoneDustLightsLamp);
         register.accept(key("selector_nbt_filters_entities"), SwiftTestFunctions::selectorNbtFiltersEntities);
+        register.accept(key("selector_nbt_matrix"), SwiftNbtTests::matrix);
     }
 
     // Hopper above a chest pulls a dropped item and pushes it down. Guards hopper / item-entity optimisations.
