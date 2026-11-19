@@ -582,6 +582,7 @@ public final class CraftServer implements Server {
             CraftDefaultPermissions.registerCorePermissions();
             if (!io.papermc.paper.configuration.GlobalConfiguration.get().misc.loadPermissionsYmlBeforePlugins) this.loadCustomPermissions(); // Paper
             this.syncCommands();
+            io.papermc.paper.swift.gametest.SwiftGameTests.start(this.console); // Swift - gameplay-parity tests (inert unless -Dswift.gametest)
         }
     }
 

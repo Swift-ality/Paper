@@ -362,3 +362,61 @@ fill {
         }
     }
 }
+
+// Swift start - gameplay-parity tests (vanilla GameTest framework inside a real Paper server)
+// ./gradlew :paper-server:runGameTests [-PgameTests=swift:*] [-PgameTestPacks=<dir of datapacks>] [-PgameTestKeepWorld=true]
+// Fresh flat world in paper-server/build/gametest/run, test datapacks copied into world/datapacks, JUnit XML at
+// paper-server/build/gametest/report.xml. Exit code = failed required tests, so the task fails when gameplay changed.
+tasks.register<JavaExec>("runGameTests") {
+    group = "verification"
+    description = "Run GameTest-framework parity tests inside a real Paper server (see io.papermc.paper.swift.gametest)"
+    mainClass.set("org.bukkit.craftbukkit.Main")
+    classpath(sourceSets.main.map { it.runtimeClasspath })
+    val base = layout.buildDirectory.dir("gametest")
+    val runDir = base.map { it.dir("run") }
+    workingDir = runDir.get().asFile
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xms2G", "-Xmx2G")
+    systemProperty("com.mojang.eula.agree", true)
+    systemProperty("joml.nounsafe", true)
+    systemProperty("io.papermc.paper.suppress.sout.nags", true)
+    systemProperty("paper.disableMigrationDelay", true)
+    systemProperty("disable.watchdog", true)
+    systemProperty("swift.gametest", providers.gradleProperty("gameTests").getOrElse("*:*"))
+    systemProperty("swift.gametest.report", base.get().file("report.xml").asFile.absolutePath)
+    val resultFile = base.get().file("result.txt").asFile
+    systemProperty("swift.gametest.result", resultFile.absolutePath)
+    isIgnoreExitValue = true
+    doLast {
+        val failed = if (resultFile.isFile) resultFile.readText().trim().toIntOrNull() else null
+        when {
+            failed == null -> throw GradleException("GameTests did not finish (no result in $resultFile) - see the server log above")
+            failed > 0 -> throw GradleException("$failed required GameTest(s) failed - see paper-server/build/gametest/report.xml")
+            else -> logger.lifecycle("All required GameTests passed")
+        }
+    }
+    args("--nogui", "--noconsole")
+    val packs = providers.gradleProperty("gameTestPacks").orElse(rootProject.layout.projectDirectory.dir("gametests/packs").asFile.absolutePath)
+    val runDirFile = runDir.get().asFile
+    val keepWorld = providers.gradleProperty("gameTestKeepWorld").map { it.toBoolean() }.getOrElse(false)
+    doFirst {
+        val dir = runDirFile
+        if (!keepWorld) {
+            dir.resolve("world").deleteRecursively()
+        }
+        dir.mkdirs()
+        resultFile.delete()
+        dir.resolve("eula.txt").writeText("eula=true\n")
+        dir.resolve("server.properties").writeText(
+            listOf(
+                "level-type=minecraft\\:flat", "generate-structures=false", "online-mode=false", "server-port=25599",
+                "spawn-protection=0", "view-distance=4", "simulation-distance=4", "enable-query=false",
+                "spawn-monsters=false", "spawn-animals=false", "max-players=1"
+            ).joinToString("\n", postfix = "\n")
+        )
+        val src = File(packs.get())
+        val dst = dir.resolve("world/datapacks")
+        dst.mkdirs()
+        src.listFiles()?.filter { it.isDirectory || it.name.endsWith(".zip") }?.forEach { it.copyRecursively(dst.resolve(it.name), overwrite = true) }
+    }
+}
+// Swift end - gameplay-parity tests

@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:selector_nbt_filters_entities",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 100,
+  "setup_ticks": 0,
+  "required": true
+}
