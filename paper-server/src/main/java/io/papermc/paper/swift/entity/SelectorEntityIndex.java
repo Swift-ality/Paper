@@ -75,11 +75,93 @@ public final class SelectorEntityIndex {
             this.builtFor = mc;
             this.built = true;
         }
+        return this.typeCandidates(filter);
+    }
+
+    private Entity[] typeCandidates(final EntityTypeTest<Entity, ?> filter) {
         if (filter instanceof EntityType<?> type) {
             final Entity[] ofType = this.byType.get(type);
             return ofType == null ? EMPTY : ofType;
         }
         return this.all;
+    }
+
+    // ---- tag candidates --------------------------------------------------------------------------
+
+    /** Not final so tests can compare both paths inside one server. */
+    public static volatile boolean tagEnabled = Boolean.parseBoolean(System.getProperty("swift.selectorTagIndex", "true"));
+    private static final int MAX_TAGS = 512;
+
+    private static final class TagCandidates {
+        boolean built;
+        int builtTable;
+        int builtTagCount;
+        boolean seen;
+        int seenTable;
+        int seenTagCount;
+        Entity[] entities = EMPTY;
+    }
+
+    private final it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap<String, TagCandidates> byTag = new it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap<>();
+
+    /**
+     * Like {@link #candidates(EntityTypeTest, Supplier)}, for a selector that requires {@code tag} and whose
+     * filters are all side-effect free (the parser only passes a tag then). The tag list holds the entities
+     * that have the tag, in the id table's iteration order; it is exact while neither the table nor that
+     * tag (see {@link SwiftTagSet#changeCount}) changed since it was built. Entities without the tag would
+     * be rejected by the selector's own tag filter, and skipping a side-effect-free filter is invisible.
+     */
+    public Entity @Nullable [] candidates(final EntityTypeTest<Entity, ?> filter, final @Nullable String tag, final Supplier<Iterator<Entity>> table) {
+        if (tag == null || !tagEnabled || !enabled) {
+            return this.candidates(filter, table);
+        }
+        final int mc = this.modCount;
+        final int tc = SwiftTagSet.changeCount(tag);
+        TagCandidates entry = this.byTag.get(tag);
+        if (entry == null) {
+            if (this.byTag.size() >= MAX_TAGS) {
+                this.byTag.clear();
+            }
+            entry = new TagCandidates();
+            this.byTag.put(tag, entry);
+        }
+        if (!(entry.built && entry.builtTable == mc && entry.builtTagCount == tc)) {
+            if (!(entry.seen && entry.seenTable == mc && entry.seenTagCount == tc)) {
+                entry.seen = true;
+                entry.seenTable = mc;
+                entry.seenTagCount = tc;
+                return this.candidates(filter, table); // first scan since a change: type path (itself exact)
+            }
+            if (!this.built || this.builtFor != mc) {
+                this.build(table.get());
+                this.builtFor = mc;
+                this.built = true;
+            }
+            final ArrayList<Entity> list = new ArrayList<>();
+            for (final Entity entity : this.all) {
+                if (entity.entityTags().contains(tag)) {
+                    list.add(entity);
+                }
+            }
+            entry.entities = list.toArray(EMPTY);
+            entry.built = true;
+            entry.builtTable = mc;
+            entry.builtTagCount = tc;
+        }
+        if (!this.built || this.builtFor != mc) {
+            return entry.entities;
+        }
+        final Entity[] ofType = this.typeCandidates(filter);
+        return ofType.length < entry.entities.length ? ofType : entry.entities; // both are exact supersets, in the same order
+    }
+
+    /** Called after a walk over tag candidates; the tag must not have changed during the walk. */
+    public void checkTagUnchangedSince(final @Nullable String tag, final int tagCountAtStart) {
+        if (tag != null && SwiftTagSet.changeCount(tag) != tagCountAtStart && !warnedConcurrentModification) {
+            warnedConcurrentModification = true;
+            LOGGER.warn("[Swift] a tag changed while a selector filtering on it was being evaluated; please report the command "
+                + "(disable with -Dswift.selectorTagIndex=false).", new Throwable());
+        }
     }
 
     private void build(final Iterator<Entity> iterator) {

@@ -68,11 +68,19 @@ final class SwiftTagSelectorTests {
             mobs.get(5).entityTags().add("swift_u");
             mobs.get(5).entityTags().removeIf("swift_u"::equals);
             count(helper, "@e[tag=swift_u]", 2, f);
-            mobs.get(0).getBukkitEntity().getScoreboardTags().clear();
+            // which two pigs still hold swift_u depends on entity-table order (limit=1 above): pick them at runtime
+            final List<Mob> holders = mobs.stream().filter(m -> m.entityTags().contains("swift_u")).toList();
+            if (holders.size() != 2) {
+                f.append("\n  expected two mobs to hold swift_u, found ").append(holders.size());
+                helper.fail(Component.literal("tag selector mismatches:" + f));
+                return;
+            }
+            holders.get(0).getBukkitEntity().getScoreboardTags().clear();
             count(helper, "@e[tag=swift_t]", 5, f);
             count(helper, "@e[tag=swift_u]", 1, f);
             // NBT load replaces the whole tag set
-            run(helper, "data merge entity " + mobs.get(2).getStringUUID() + " {Tags:[\"swift_v\"]}");
+            final Mob holder = holders.get(1);
+            run(helper, "data merge entity " + holder.getStringUUID() + " {Tags:[\"swift_v\"]}");
             count(helper, "@e[tag=swift_t]", 4, f);
             count(helper, "@e[tag=swift_v]", 1, f);
             count(helper, "@e[tag=swift_u]", 0, f);
@@ -91,13 +99,30 @@ final class SwiftTagSelectorTests {
 
             // side effects must still happen on entities WITHOUT the tag when an nbt= filter comes first:
             // vanilla saves every candidate for nbt=, and Entity#saveWithoutId resets a NaN rotation to 0.
+            // Each probe runs the selector three times with the NaN set before the last run, so any
+            // cache that only kicks in on a repeated query is warm when it matters.
             final Mob witness = helper.spawn(EntityTypes.ZOMBIE, new BlockPos(4, 1, 6));
             witness.setNoAi(true);
-            setYRot(witness, Float.NaN);
-            run(helper, "execute if entity @e[type=zombie,nbt={},tag=swift_nobody]");
-            final float after = witness.getYRot();
-            if (after != 0.0F) {
-                f.append("\n  nbt= before tag= must still save untagged entities (NaN yaw not reset, now ").append(after).append(")");
+            // Filters run in the order written: with nbt= first vanilla saves the untagged zombie (yaw reset),
+            // with tag= first the tag filter rejects it before nbt= runs (yaw stays NaN).
+            final Object[][] probes = {
+                {"@e[type=zombie,nbt={},tag=swift_nobody]", true},
+                {"@e[nbt={},tag=swift_nobody]", true},
+                {"@e[nbt={},tag=swift_nobody,limit=1]", true},
+                {"@e[tag=swift_nobody,nbt={}]", false},
+            };
+            for (final Object[] probe : probes) {
+                final String selector = (String) probe[0];
+                final boolean vanillaSaves = (Boolean) probe[1];
+                run(helper, "execute if entity " + selector);
+                run(helper, "execute if entity " + selector);
+                setYRot(witness, Float.NaN);
+                run(helper, "execute if entity " + selector);
+                final boolean saved = witness.getYRot() == 0.0F;
+                if (saved != vanillaSaves) {
+                    f.append("\n  ").append(selector).append(vanillaSaves ? " must still save the untagged zombie (yaw not reset)" : " must not save the untagged zombie (yaw was reset)");
+                }
+                setYRot(witness, 0.0F);
             }
             if (!f.isEmpty()) {
                 helper.fail(Component.literal("tag selector mismatches:" + f));

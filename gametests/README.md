@@ -21,6 +21,29 @@ Paper services), which is why this runs inside a normal server.
 The runner is `paper-server/src/main/java/io/papermc/paper/swift/gametest/SwiftGameTests.java`.
 It does nothing unless `-Dswift.gametest` is set.
 
+## Fake players
+
+`SwiftFakePlayer` joins a fake player through the normal join path (`PlayerList#placeNewPlayer`,
+join event, permissions) on an in-memory netty channel. `command("...")` writes a real
+`ServerboundChatCommandPacket` into that channel, so the command goes through the same route as a
+typed one (packet listener, `PlayerCommandPreprocessEvent`, permission checks, `@s`/`@p` from the
+player). `drainChat()` returns the messages the server sent back. Use it for anything a player would
+do in real gameplay; always `SwiftFakePlayer.leaveAll(helper)` in a `finally` block (cleanup is per
+test, because tests in a batch run side by side).
+
+```java
+SwiftFakePlayer op = SwiftFakePlayer.join(helper, "SwiftOp", new BlockPos(2, 1, 2), true);   // op
+SwiftFakePlayer guest = SwiftFakePlayer.join(helper, "SwiftGuest", new BlockPos(6, 1, 6), false);
+helper.runAfterDelay(1, () -> {
+    try {
+        guest.command("tag @s add x");          // refused: guest is not an op
+        op.command("tag @p add nearest");       // @p resolved from the op's own position
+    } finally {
+        SwiftFakePlayer.leaveAll(helper);
+    }
+});
+```
+
 ## Adding a test
 
 Java function test:
@@ -55,3 +78,12 @@ Gotchas found while building this:
 - Player saves contain wall-clock fields (`bukkit.lastPlayed`, `Paper.LastSeen`) that differ
   between any two saves; mask them when comparing saves.
 - Test commands print to the server log (not suppressed) so a malformed command shows up.
+- Never assume which entity `limit=1` (or `execute as` order) picks: it follows the entity table's
+  iteration order, which changes with every other entity in the world (other tests included). Pick
+  the affected entity at runtime; check order only in a differential test.
+- Selector filters run in the order written and stop at the first failure: `@e[tag=x,nbt={}]` never
+  runs `nbt=` on entities without `x`, `@e[nbt={},tag=x]` does (and `nbt=` has side effects).
+- For a cache that only engages on a repeated query, run the query at least twice before the
+  assertion, or a planted bug will slip past (it did once).
+- `-PgameTests` takes one selector; comma lists silently match fewer tests. Run mutation checks
+  against the whole suite.

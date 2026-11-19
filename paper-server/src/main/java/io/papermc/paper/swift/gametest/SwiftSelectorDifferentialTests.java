@@ -42,7 +42,44 @@ final class SwiftSelectorDifferentialTests {
         "@e[tag=swift_db,limit=2]", "@e[type=armor_stand,limit=4]", "@e[type=marker]", "@e[type=villager,tag=!swift_da]",
         "@e[type=cow,sort=arbitrary,limit=5]", "@e[type=chicken,sort=nearest,limit=2]", "@e[type=pig,sort=furthest]",
         "@e[type=wither]", "@e[type=player]", "@e[type=#minecraft:skeletons]", "@e[tag=swift_da,tag=swift_db]",
+        // tag index
+        "@e[tag=swift_da]", "@e[tag=swift_db,limit=3]", "@e[type=pig,tag=swift_da]", "@e[tag=swift_dc]", "@e[tag=swift_dc,type=cow,limit=1]",
+        "@e[tag=swift_da,tag=!swift_db]", "@e[tag=!swift_da,tag=swift_db]", "@e[tag=swift_none]", "@e[tag=swift_da,sort=nearest,limit=4]",
+        "@e[tag=swift_da,name=swift_named]", "@e[tag=swift_db,scores={swift_dtest=1..}]",
+        // impure filters keep the full walk
+        "@e[nbt={},tag=swift_da]", "@e[tag=swift_da,nbt={OnGround:1b}]", "@e[tag=swift_db,predicate=minecraft:swift_missing]",
     };
+    private static final String[] TAGS = {"swift_da", "swift_db", "swift_dc"};
+
+    /** Changes tags through every channel: Entity methods, the live Bukkit set, iterator removal, removeIf, clear, NBT load. */
+    private static void mutateTags(final GameTestHelper helper, final List<Entity> entities, final Random random) {
+        if (entities.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < 6; i++) {
+            final Entity e = entities.get(random.nextInt(entities.size()));
+            final String tag = TAGS[random.nextInt(TAGS.length)];
+            switch (random.nextInt(8)) {
+                case 0 -> e.addTag(tag);
+                case 1 -> e.removeTag(tag);
+                case 2 -> e.getBukkitEntity().getScoreboardTags().add(tag);
+                case 3 -> e.getBukkitEntity().getScoreboardTags().remove(tag);
+                case 4 -> {
+                    for (final var it = e.getBukkitEntity().getScoreboardTags().iterator(); it.hasNext(); ) {
+                        if (it.next().equals(tag)) it.remove();
+                    }
+                }
+                case 5 -> e.entityTags().removeIf(tag::equals);
+                case 6 -> {
+                    if (random.nextInt(4) == 0) e.entityTags().clear();
+                }
+                default -> SwiftNbtTests.run(helper, "data merge entity " + e.getStringUUID() + " {Tags:[\"" + tag + "\"]}");
+            }
+            if (random.nextInt(10) == 0) {
+                e.setCustomName(Component.literal("swift_named"));
+            }
+        }
+    }
 
     static void differential(final GameTestHelper helper) {
         final var level = helper.getLevel();
@@ -52,6 +89,8 @@ final class SwiftSelectorDifferentialTests {
         final CommandSourceStack source = level.getServer().createCommandSourceStack().withLevel(level)
             .withPosition(Vec3.atCenterOf(helper.absolutePos(new BlockPos(4, 1, 4))));
         final boolean wasEnabled = SelectorEntityIndex.enabled;
+        final boolean wasTagEnabled = SelectorEntityIndex.tagEnabled;
+        SwiftNbtTests.run(helper, "scoreboard objectives add swift_dtest dummy");
         final StringBuilder failures = new StringBuilder();
         long comparisons = 0;
         try {
@@ -72,6 +111,10 @@ final class SwiftSelectorDifferentialTests {
                         }
                         if (random.nextBoolean()) e.addTag("swift_da");
                         if (random.nextBoolean()) e.addTag("swift_db");
+                        if (random.nextInt(5) == 0) e.addTag("swift_dc");
+                        if (random.nextInt(3) == 0) {
+                            SwiftNbtTests.run(helper, "scoreboard players set " + e.getStringUUID() + " swift_dtest " + random.nextInt(3));
+                        }
                         spawned.add(e);
                     }
                     final int remove = random.nextInt(Math.max(1, spawned.size() / 4));
@@ -79,8 +122,13 @@ final class SwiftSelectorDifferentialTests {
                         spawned.remove(random.nextInt(spawned.size())).discard();
                     }
                 }
-                for (final String s : SELECTORS) {
-                    comparisons += compareSelector(s, source, failures);
+                for (int sub = 0; sub < 3; sub++) {
+                    if (sub > 0) {
+                        mutateTags(helper, spawned, random);
+                    }
+                    for (final String s : SELECTORS) {
+                        comparisons += compareSelector(s, source, failures);
+                    }
                 }
                 for (final EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
                     comparisons += compareLookup(lookup, type, failures);
@@ -92,6 +140,7 @@ final class SwiftSelectorDifferentialTests {
             failures.append("\n  threw ").append(e);
         } finally {
             SelectorEntityIndex.enabled = wasEnabled;
+            SelectorEntityIndex.tagEnabled = wasTagEnabled;
         }
         if (!failures.isEmpty()) {
             helper.fail(Component.literal("selector index differs from the unindexed walk:" + failures));
@@ -103,12 +152,14 @@ final class SwiftSelectorDifferentialTests {
         }
     }
 
-    /** Off, then on three times (first scan after a change, snapshot build, snapshot reuse). */
+    /** Off, then type index only, then type + tag index three times (first scan after a change, build, reuse). */
     private static int compareSelector(final String selector, final CommandSourceStack source, final StringBuilder failures) throws Exception {
         SelectorEntityIndex.enabled = false;
+        SelectorEntityIndex.tagEnabled = false;
         final List<? extends Entity> expected = new EntitySelectorParser(new StringReader(selector), true).parse().findEntities(source);
         SelectorEntityIndex.enabled = true;
-        for (int pass = 0; pass < 3; pass++) {
+        for (int pass = 0; pass < 5; pass++) {
+            SelectorEntityIndex.tagEnabled = pass >= 2;
             final List<? extends Entity> got = new EntitySelectorParser(new StringReader(selector), true).parse().findEntities(source);
             if (!sameOrder(expected, got)) {
                 failures.append("\n  ").append(selector).append(" pass ").append(pass).append(": ").append(describe(expected)).append(" vs ").append(describe(got));

@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 21:28:23 +0100
+Subject: [PATCH] Swift: Index world-wide entity selectors by tag
+
+@e[tag=X] (no distance/volume) walked every loaded entity. Entities' tag
+sets now report every change (SwiftTagSet, also covering the live Bukkit
+scoreboard-tag set), and selectors whose filters are all side-effect free
+(allow-list of options; nbt=, predicate=, advancements= and anything
+unknown keep the full walk) visit only the entities that carry X, in the
+same entity-table order. See io.papermc.paper.swift.entity.SelectorEntityIndex.
+
+Benchmark (~3000 entities): @e[tag=X] 72 -> 7 us, @e[type=marker,tag=X] 84 -> 5 us.
+Disable with -Dswift.selectorTagIndex=false.
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+index 2e260d0918a495df890603a9b714c37ae0fb5afc..7bff90cf6f55eb9a037e66b2a922210b44ed7339 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+@@ -222,7 +222,16 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+      * entity selectors only. See {@link io.papermc.paper.swift.entity.SelectorEntityIndex}.
+      */
+     public <U extends Entity> void swift$getForSelector(final EntityTypeTest<Entity, U> filter, final AbortableIterationConsumer<U> action) {
+-        final Entity[] candidates = this.swift$selectorIndex.candidates(filter, this.entityById::valueIterator);
++        this.swift$getForSelector(filter, null, action);
++    }
++
++    /**
++     * As above for a selector whose matches must all carry {@code requiredTag} and whose filters are side-effect free
++     * (null = no such tag).
++     */
++    public <U extends Entity> void swift$getForSelector(final EntityTypeTest<Entity, U> filter, final @org.jspecify.annotations.Nullable String requiredTag, final AbortableIterationConsumer<U> action) {
++        final int tagCount = requiredTag == null ? 0 : io.papermc.paper.swift.entity.SwiftTagSet.changeCount(requiredTag);
++        final Entity[] candidates = this.swift$selectorIndex.candidates(filter, requiredTag, this.entityById::valueIterator);
+         if (candidates == null) {
+             this.get(filter, action);
+             return;
+@@ -239,6 +248,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+             }
+         }
+         this.swift$selectorIndex.checkUnmodifiedSince(modCount);
++        this.swift$selectorIndex.checkTagUnchangedSince(requiredTag, tagCount);
+     }
+     // Swift end - selector entity index
+ 
+diff --git a/net/minecraft/commands/arguments/selector/EntitySelector.java b/net/minecraft/commands/arguments/selector/EntitySelector.java
+index 4bd53ab5781368cdecec76408921ed3334488355..84a57d233c073af86bb4af5579f1acae77e778c1 100644
+--- a/net/minecraft/commands/arguments/selector/EntitySelector.java
++++ b/net/minecraft/commands/arguments/selector/EntitySelector.java
+@@ -67,6 +67,7 @@ public class EntitySelector {
+     private final @Nullable UUID entityUUID;
+     private final EntityTypeTest<Entity, ?> type;
+     private final boolean usesSelector;
++    public @Nullable String swift$indexTag; // Swift - selector tag index: a tag every match must have, set only when all filters are side-effect free
+ 
+     public EntitySelector(
+         final int maxResults,
+@@ -187,7 +188,7 @@ public class EntitySelector {
+             if (absoluteAABB != null) {
+                 level.getEntities(this.type, absoluteAABB, predicate, result, limit);
+             } else {
+-                level.swift$getEntitiesForSelector(this.type, predicate, result, limit); // Swift - selector entity index
++                level.swift$getEntitiesForSelector(this.type, this.swift$indexTag, predicate, result, limit); // Swift - selector entity index
+             }
+         }
+     }
+diff --git a/net/minecraft/commands/arguments/selector/EntitySelectorParser.java b/net/minecraft/commands/arguments/selector/EntitySelectorParser.java
+index d15219cfc49d462f0b6498c67bbc5e092dc52d42..966b5cdcc1ba02187f629dfe5a0830c716d8d227 100644
+--- a/net/minecraft/commands/arguments/selector/EntitySelectorParser.java
++++ b/net/minecraft/commands/arguments/selector/EntitySelectorParser.java
+@@ -93,6 +93,21 @@ public class EntitySelectorParser {
+     private BiConsumer<Vec3, List<? extends Entity>> order = EntitySelector.ORDER_ARBITRARY;
+     private boolean currentEntity;
+     private @Nullable String playerName;
++    // Swift start - selector tag index
++    // Options whose filters have no side effects; a selector made only of these may skip entities that lack its tag.
++    private static final java.util.Set<String> SWIFT_PURE_OPTIONS = java.util.Set.of(
++        "name", "distance", "level", "x", "y", "z", "dx", "dy", "dz", "x_rotation", "y_rotation", "limit", "sort",
++        "gamemode", "team", "type", "tag", "scores"
++    );
++    private boolean swift$impureOption;
++    private @Nullable String swift$indexTag;
++
++    public void swift$requireTag(final String tag) {
++        if (this.swift$indexTag == null) {
++            this.swift$indexTag = tag;
++        }
++    }
++    // Swift end - selector tag index
+     private int startPosition;
+     private @Nullable UUID entityUUID;
+     private BiFunction<SuggestionsBuilder, Consumer<SuggestionsBuilder>, CompletableFuture<Suggestions>> suggestions = SUGGEST_NOTHING;
+@@ -146,7 +161,7 @@ public class EntitySelectorParser {
+             position = o -> new Vec3(this.x == null ? o.x : this.x, this.y == null ? o.y : this.y, this.z == null ? o.z : this.z);
+         }
+ 
+-        return new EntitySelector(
++        EntitySelector swiftSelector = new EntitySelector( // Swift - selector tag index
+             this.maxResults,
+             this.includesEntities,
+             this.worldLimited,
+@@ -161,6 +176,8 @@ public class EntitySelectorParser {
+             this.type,
+             this.usesSelectors
+         );
++        swiftSelector.swift$indexTag = this.swift$impureOption ? null : this.swift$indexTag; // Swift - selector tag index
++        return swiftSelector; // Swift - selector tag index
+     }
+ 
+     private AABB createAabb(final double x, final double y, final double z) {
+@@ -300,6 +317,7 @@ public class EntitySelectorParser {
+             int start = this.reader.getCursor();
+             String key = this.reader.readString();
+             EntitySelectorOptions.Modifier modifier = EntitySelectorOptions.get(this, key, start);
++            if (!SWIFT_PURE_OPTIONS.contains(key)) this.swift$impureOption = true; // Swift - selector tag index
+             this.reader.skipWhitespace();
+             if (!this.reader.canRead() || this.reader.peek() != '=') {
+                 this.reader.setCursor(start);
+diff --git a/net/minecraft/commands/arguments/selector/options/EntitySelectorOptions.java b/net/minecraft/commands/arguments/selector/options/EntitySelectorOptions.java
+index 56955ce3058d0c976f9781aa7db782fa280cb29e..f7ef16781989f6ccc01880ca6f122198446c456d 100644
+--- a/net/minecraft/commands/arguments/selector/options/EntitySelectorOptions.java
++++ b/net/minecraft/commands/arguments/selector/options/EntitySelectorOptions.java
+@@ -321,6 +321,7 @@ public class EntitySelectorOptions {
+             register("tag", parser -> {
+                 boolean inverted = parser.shouldInvertValue();
+                 String tag = parser.getReader().readUnquotedString();
++                if (!inverted && !"".equals(tag)) parser.swift$requireTag(tag); // Swift - selector tag index
+                 parser.addPredicate(e -> "".equals(tag) ? e.entityTags().isEmpty() != inverted : e.entityTags().contains(tag) != inverted);
+             }, ALWAYS_AVAILABLE, Component.translatable("argument.entity.options.tag.description"));
+             register("nbt", parser -> {
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 630918efb9b72a11545f7ab293d517a5b3acefd9..c7aca4fb8fbfea24d59559730c68365ec33bf548 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1551,9 +1551,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     // Swift start - selector entity index
+     /** {@link #getEntities(EntityTypeTest, Predicate, List, int)} for world-wide entity selectors: same results, same order. */
+     public <T extends Entity> void swift$getEntitiesForSelector(
+-        final EntityTypeTest<Entity, T> type, final Predicate<? super T> selector, final List<? super T> result, final int maxResults
++        final EntityTypeTest<Entity, T> type, final @Nullable String requiredTag, final Predicate<? super T> selector, final List<? super T> result, final int maxResults
+     ) {
+-        this.moonrise$getEntityLookup().swift$getForSelector(type, entity -> {
++        this.moonrise$getEntityLookup().swift$getForSelector(type, requiredTag, entity -> {
+             if (selector.test(entity)) {
+                 result.add(entity);
+                 if (result.size() >= maxResults) {
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index bea975af0b8be42883bac92d0366cf93ebadc0fc..cfcc9945712e43ecd1834a2f04d878ba5520d779 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -338,7 +338,7 @@ public abstract class Entity
+     protected UUID uuid = Mth.createInsecureUUID(this.random);
+     protected String stringUUID = this.uuid.toString();
+     private boolean hasGlowingTag;
+-    private final Set<String> tags = new io.papermc.paper.util.SizeLimitedSet<>(new it.unimi.dsi.fastutil.objects.ObjectOpenHashSet<>(), MAX_ENTITY_TAG_COUNT); // Paper - fully limit tag size - replace set impl
++    private final Set<String> tags = new io.papermc.paper.swift.entity.SwiftTagSet(new it.unimi.dsi.fastutil.objects.ObjectOpenHashSet<>(), MAX_ENTITY_TAG_COUNT); // Paper - fully limit tag size - replace set impl // Swift - selector tag index: set reports changes
+     private final double[] pistonDeltas = new double[]{0.0, 0.0, 0.0};
+     private long pistonDeltasGameTime;
+     private EntityDimensions dimensions;
