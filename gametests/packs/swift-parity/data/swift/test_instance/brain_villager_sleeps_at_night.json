@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:brain_villager_sleeps_at_night",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 1200,
+  "setup_ticks": 0,
+  "required": true
+}
