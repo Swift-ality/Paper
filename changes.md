@@ -28,6 +28,7 @@ exception to the "same gameplay" rule and is off by default (see its section).
 | 0043 | Villagers skip searches that cannot find anything | `swift.poiEmptySearchCache` |
 | 0044 | Spawning skips biome lookups that can only say "no cost" | `swift.spawnCostSkip` |
 | 0045 | Mobs tick on several threads at once (Async-style; **changes tick order**) | off unless `swift.asyncEntities=true` |
+| 0046 | Entity tracker (who sees what, entity packets) runs on several threads | off unless `swift.asyncTracker=true` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -230,6 +231,38 @@ husks over 40 swords (no sword duplicated); 16 cows and 16 goats breeding (babie
 the adults that bred); 12 villagers and 12 workstations (no workstation claimed twice); worker threads
 loading far chunks, with and without the lock held, without deadlock. Each test also requires that worker
 threads really ticked entities. With the lock switched off on purpose, the same tests crash the server.
+
+## 0046: parallel entity tracker (`swift-invasive`, off by default)
+
+**Before:** after entities tick, the tracker visits every entity on the main thread: it works out which
+nearby players should see it (pairing: spawn packet; unpairing: remove packet) and sends its movement,
+rotation and data changes to them. Its cost grows with entities x players near them (0.9 ms/tick in a profile
+with 8,000 zombies and one player).
+
+**Now (with `-Dswift.asyncTracker=true`, or `parallel-entity-tracker.enabled: true` in `config/swift.yml`):**
+the same per-entity work is shared out to the worker threads of patch 0045 (the main thread helps). Entity
+ticking is finished at that point, so no entity changes while its packets are built.
+
+- Pairing and unpairing a player (the spawn/remove packets, the `PlayerTrackEntityEvent` /
+  `PlayerUntrackEntityEvent` plugin events and the debug-subscriber registry) take the shared lock.
+- Players and item frames (several frames can show the same map, whose data is shared) stay on the main
+  thread.
+- Packets from worker threads go into each connection's existing send queue, which Paper flushes on the main
+  thread after all worlds have ticked, in the same tick; packets from one entity to one player keep their
+  order. Only the order *between* different entities' packets can differ.
+
+**Gameplay:** unchanged; the tracker only decides what clients are told.
+
+**Gain:** small on its own: a tracker pass over 1,500 moving cows with 16 players took about 0.45 ms serially and
+0.3-0.4 ms in parallel (`bench_async_tracker`, noisy at this size). It scales with players x entities, so it
+matters on busy servers.
+
+**Tests** (`SwiftTrackerTests`, real packets through fake players): two players pair with 80 cows (spawn
+packets), one leaves 3,000 blocks and is unpaired from all (remove packets) while the other keeps them, then
+comes back and is paired again; 80 cows moved every tick all deliver movement packets. While writing them,
+the fake players turned out to send every packet straight from the calling thread (their connection was
+never marked live the way a real one is), which loses packets when several threads send at once; they now
+behave like real players.
 
 ---
 

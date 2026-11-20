@@ -66,6 +66,10 @@ public final class SwiftAsync {
     /** Not final so tests can switch it inside one server. */
     public static volatile boolean enabled = Boolean.getBoolean("swift.asyncEntities");
     public static volatile int minParallel = Integer.getInteger("swift.asyncEntities.minParallel", 32);
+    /** Parallel entity tracker (patch 0046): packets only, gameplay unchanged. {@code -Dswift.asyncTracker=true}. */
+    public static volatile boolean trackerEnabled = Boolean.getBoolean("swift.asyncTracker");
+    public static volatile int trackerMinParallel = Integer.getInteger("swift.asyncTracker.minParallel", 64);
+    public static final AtomicLong PARALLEL_TRACKER_TICKS = new AtomicLong();
     public static final int THREADS = Math.max(1, Integer.getInteger("swift.asyncEntities.threads",
         Math.min(8, Runtime.getRuntime().availableProcessors() - 1)));
     private static final Set<EntityType<?>> EXTRA_SYNC = new HashSet<>();
@@ -326,17 +330,30 @@ public final class SwiftAsync {
             return;
         }
 
-        final Runnable[] tasks = buildTasks(parallelEntities, tickOne);
+        runTasks(buildTasks(parallelEntities, tickOne));
+        PARALLEL_TICKS.incrementAndGet();
+        PARALLEL_ENTITY_TICKS.addAndGet(parallelEntities.size());
+        SYNC_ENTITY_TICKS.addAndGet(syncEntities.size());
+
+        // main-thread entities in their usual relative order
+        syncEntities.forEach(tickOne);
+    }
+
+    /**
+     * Runs {@code tasks} on the worker threads and the calling (main) thread, with the parallel phase active
+     * (shared-state writes take {@link #LOCK}); returns when all are done. Must be called on the main thread.
+     */
+    public static void runTasks(final Runnable[] tasks) {
         final AtomicInteger next = new AtomicInteger();
         final int helpers = Math.min(THREADS, tasks.length - 1);
-        final CountDownLatch done = new CountDownLatch(helpers);
+        final CountDownLatch done = new CountDownLatch(Math.max(0, helpers));
         final Runnable runner = () -> {
             int i;
             while ((i = next.getAndIncrement()) < tasks.length) {
                 try {
                     tasks[i].run();
                 } catch (final Throwable t) {
-                    LOGGER.error("[Swift] parallel entity task failed", t);
+                    LOGGER.error("[Swift] parallel task failed", t);
                 }
             }
         };
@@ -355,7 +372,7 @@ public final class SwiftAsync {
                     }
                 });
             }
-            runner.run(); // the main thread takes groups too
+            runner.run(); // the main thread takes tasks too
             while (done.getCount() > 0) {
                 if (!serveMainRequests()) {
                     LockSupport.parkNanos(done, 50_000L);
@@ -365,12 +382,21 @@ public final class SwiftAsync {
         } finally {
             parallel = false;
         }
-        PARALLEL_TICKS.incrementAndGet();
-        PARALLEL_ENTITY_TICKS.addAndGet(parallelEntities.size());
-        SYNC_ENTITY_TICKS.addAndGet(syncEntities.size());
+    }
 
-        // main-thread entities in their usual relative order
-        syncEntities.forEach(tickOne);
+    /** Splits {@code items} into about four tasks per thread, in list order, and runs them with {@link #runTasks}. */
+    public static <T> void forEachParallel(final List<T> items, final Consumer<T> action) {
+        final int target = Math.max(1, items.size() / ((THREADS + 1) * 4));
+        final List<Runnable> tasks = new ArrayList<>();
+        for (int from = 0; from < items.size(); from += target) {
+            final List<T> slice = items.subList(from, Math.min(items.size(), from + target));
+            tasks.add(() -> {
+                for (final T item : slice) {
+                    action.accept(item);
+                }
+            });
+        }
+        runTasks(tasks.toArray(new Runnable[0]));
     }
 
     /** Groups entities by 4x4-chunk area (spatial locality, as Async) and packs groups into tasks. */

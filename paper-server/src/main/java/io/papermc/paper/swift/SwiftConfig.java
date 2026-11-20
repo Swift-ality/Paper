@@ -48,6 +48,12 @@ public final class SwiftConfig {
             List.of("A world with fewer mobs than this ticks them serially (not worth the overhead).")),
         new Option("parallel-entity-ticking.sync-entity-types", "swift.asyncEntities.sync", List.of(),
             List.of("Extra entity types that always tick on the main thread, e.g. [minecraft:bee, minecraft:allay].")),
+        // parallel entity tracker
+        new Option("parallel-entity-tracker.enabled", "swift.asyncTracker", false,
+            List.of("Run the entity tracker (who sees which entity, movement/data packets) on the worker threads",
+                "(patch 0046). Packets only: gameplay is unchanged. Uses the same threads as parallel-entity-ticking.")),
+        new Option("parallel-entity-tracker.min-parallel", "swift.asyncTracker.minParallel", 64,
+            List.of("A world tracking fewer entities than this runs the tracker serially.")),
         // debugging
         new Option("debug.shadow-verify", "swift.verify", false,
             List.of("Run the original code next to each optimisation and log any difference. Slow; for testing."))

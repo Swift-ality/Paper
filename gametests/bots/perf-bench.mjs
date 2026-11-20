@@ -22,11 +22,13 @@ const OFF = ['-Dswift.selectorIndex=false', '-Dswift.selectorTagIndex=false', '-
 const MODES = {
   vanilla: [...OFF, '-Dswift.asyncEntities=false'],
   swift: ['-Dswift.asyncEntities=false'],
-  parallel: ['-Dswift.asyncEntities=true']
+  parallel: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true']
 }
 const WARMUP_S = Number(process.env.WARMUP_S || 45)
 const MEASURE_S = 60
-// SCENARIO=farm (default): 400 villagers + 1000 animals at noon; SCENARIO=zombies: 3000 zombies at midnight
+// SCENARIO=farm (default): 400 villagers + 1000 animals at noon; SCENARIO=zombies: 3000 zombies at midnight;
+// SCENARIO=huge: 10000 zombies + 10000 villagers at midnight, 61x61 pen split by a glass wall (zombies see the
+// villagers and keep trying to reach them, but cannot, so the count stays stable)
 const SCENARIO = process.env.SCENARIO || 'farm'
 
 function prepare () {
@@ -43,7 +45,8 @@ function prepare () {
 
 function startServer (mode, flags) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('java', ['-Xms4G', '-Xmx4G', ...flags, '-jar', 'swift-paper.jar', '--nogui'], { cwd: RUN, stdio: ['pipe', 'pipe', 'pipe'] })
+    const heap = SCENARIO === 'huge' ? '10G' : '4G'
+    const proc = spawn('java', [`-Xms${heap}`, `-Xmx${heap}`, ...flags, '-jar', 'swift-paper.jar', '--nogui'], { cwd: RUN, stdio: ['pipe', 'pipe', 'pipe'] })
     const log = fs.createWriteStream(path.join(RUN, `bench-${SCENARIO}-${mode}.log`))
     proc.lines = []
     let done = false
@@ -99,24 +102,30 @@ async function runMode (mode) {
   await command(proc, 'op Bench')
   await command(proc, 'gamerule spawn_mobs false')
   await command(proc, 'gamerule advance_time false')
-  await command(proc, SCENARIO === 'zombies' ? 'time set midnight' : 'time set noon')
+  await command(proc, SCENARIO === 'farm' ? 'time set noon' : 'time set midnight')
   await command(proc, 'gamemode spectator Bench')
   await command(proc, 'tp Bench 0 -50 0')
-  const R = 22
+  const R = SCENARIO === 'huge' ? 30 : 22
   for (let y = -60; y <= -58; y++) {
     await command(proc, `fill ${-R - 1} ${y} ${-R - 1} ${R + 1} ${y} ${-R - 1} glass`, 50)
     await command(proc, `fill ${-R - 1} ${y} ${R + 1} ${R + 1} ${y} ${R + 1} glass`, 50)
     await command(proc, `fill ${-R - 1} ${y} ${-R - 1} ${-R - 1} ${y} ${R + 1} glass`, 50)
     await command(proc, `fill ${R + 1} ${y} ${-R - 1} ${R + 1} ${y} ${R + 1} glass`, 50)
   }
-  const plan = SCENARIO === 'zombies' ? [['zombie', 3000]] : [['villager', 400], ['cow', 300], ['sheep', 300], ['pig', 200], ['chicken', 200]]
+  if (SCENARIO === 'huge') {
+    for (let y = -60; y <= -57; y++) await command(proc, `fill 0 ${y} ${-R} 0 ${y} ${R} glass`, 50)
+  }
+  const plan = SCENARIO === 'zombies' ? [['zombie', 3000]]
+    : SCENARIO === 'huge' ? [['zombie', 10000], ['villager', 10000]]
+    : [['villager', 400], ['cow', 300], ['sheep', 300], ['pig', 200], ['chicken', 200]]
   let n = 0
   for (const [type, count] of plan) {
     for (let i = 0; i < count; i++, n++) {
-      const x = -R + (n * 7) % (2 * R + 1)
+      let x = -R + (n * 7) % (2 * R + 1)
       const z = -R + Math.floor(n * 7 / (2 * R + 1)) * 3 % (2 * R + 1)
+      if (SCENARIO === 'huge') x = (type === 'zombie' ? -1 : 1) * (1 + (i * 7) % R)
       proc.stdin.write(`summon minecraft:${type} ${x} -60 ${z} {PersistenceRequired:1b}\n`)
-      if (n % 100 === 99) await sleep(100)
+      if (n % 100 === 99) await sleep(SCENARIO === 'huge' ? 60 : 100)
     }
   }
   await sleep(1000)

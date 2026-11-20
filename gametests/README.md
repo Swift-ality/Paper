@@ -144,3 +144,9 @@ workers can load chunks without deadlock. Run the whole suite in this mode with 
 small tests tick in parallel) **several times**: races are probabilistic, a single clean run proves little.
 All other tests must pass in this mode too. `swift:bench_async_entities` (optional) measures serial vs
 parallel on 300 villagers.
+
+## Parallel entity tracker (patch 0046)
+
+`-Dswift.asyncTracker=true -Dswift.asyncTracker.minParallel=1` runs the tracker on the worker threads for every
+world. `swift:tracker_*` check pairing, unpairing and movement packets through fake players; run them (and the
+whole suite) in that mode several times. `swift:bench_async_tracker` (optional) times one tracker pass.

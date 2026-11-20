@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 22:39:20 +0100
+Subject: [PATCH] Swift: Parallel entity tracker (off by default)
+
+
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index fd0b9f20fbdd523d51550fd6009b5011e6e7e6e6..4df6275e6d3040e48259f2bbfb27a64d939b3f8f 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -1098,22 +1098,43 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         try {
+             final ca.spottedleaf.moonrise.common.list.ReferenceList<net.minecraft.world.entity.Entity> trackerEntities = this.trackerEntities;
+             final Entity[] trackerEntitiesRaw = trackerEntities.getRawDataUnchecked();
++            // Swift start - async tracker: track entities on the worker threads (packets only, gameplay unchanged)
++            final int swift$size = trackerEntities.size();
++            if (io.papermc.paper.swift.async.SwiftAsync.trackerEnabled && swift$size >= io.papermc.paper.swift.async.SwiftAsync.trackerMinParallel) {
++                final java.util.List<Entity> swift$parallel = new java.util.ArrayList<>(swift$size);
++                final java.util.List<Entity> swift$sync = new java.util.ArrayList<>();
++                for (int i = 0; i < swift$size; ++i) {
++                    final Entity entity = trackerEntitiesRaw[i];
++                    // players (their own connection state) and item frames (map data shared between frames) stay on the main thread
++                    (entity instanceof ServerPlayer || entity instanceof net.minecraft.world.entity.decoration.ItemFrame ? swift$sync : swift$parallel).add(entity);
++                }
++                io.papermc.paper.swift.async.SwiftAsync.forEachParallel(swift$parallel, this::swift$trackEntity);
++                io.papermc.paper.swift.async.SwiftAsync.PARALLEL_TRACKER_TICKS.incrementAndGet();
++                swift$sync.forEach(this::swift$trackEntity);
++                return;
++            }
++            // Swift end - async tracker
+             for (int i = 0, len = trackerEntities.size(); i < len; ++i) {
+                 final Entity entity = trackerEntitiesRaw[i];
++                this.swift$trackEntity(entity); // Swift - async tracker: loop body moved to a method
++            }
++        } finally {
++            this.iteratingTrackerEntities = false;
++        }
++    }
++    // Swift start - async tracker: one entity's tracker update (the original loop body)
++    private void swift$trackEntity(final Entity entity) {
+                 final ChunkMap.TrackedEntity tracker = ((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerEntity)entity).moonrise$getTrackedEntity();
+                 if (tracker == null) {
+-                    continue;
++                    return;
+                 }
+                 ((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$tick(((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkData().nearbyPlayers);
+                 if (((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$hasPlayers()
+                     || ((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkStatus().isOrAfter(FullChunkStatus.ENTITY_TICKING)) {
+                     tracker.serverEntity.sendChanges();
+                 }
+-            }
+-        } finally {
+-            this.iteratingTrackerEntities = false;
+-        }
+     }
++    // Swift end - async tracker
+     // Paper end - optimise entity tracker
+ 
+     protected void tick() {
+@@ -1396,6 +1417,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         }
+ 
+         public void removePlayer(final ServerPlayer player) {
++            final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async tracker: serialise pairing changes
+             org.spigotmc.AsyncCatcher.catchOp("player tracker clear"); // Spigot
+             if (this.seenBy.remove(player.connection)) {
+                 this.serverEntity.removePairing(player);
+@@ -1403,6 +1425,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+                     ChunkMap.this.level.debugSynchronizers().dropEntity(this.entity);
+                 }
+             }
++            } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async tracker: serialise pairing changes
+         }
+ 
+         public void updatePlayer(final ServerPlayer player) {
+@@ -1437,6 +1460,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+                 // CraftBukkit end
+                 if (visibleToPlayer) {
+                     if (this.seenBy.add(player.connection)) {
++                        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async tracker: serialise pairing changes
+                         // Paper start - entity tracking events
+                         if (io.papermc.paper.event.player.PlayerTrackEntityEvent.getHandlerList().getRegisteredListeners().length == 0 || new io.papermc.paper.event.player.PlayerTrackEntityEvent(player.getBukkitEntity(), this.entity.getBukkitEntity()).callEvent()) {
+                         this.serverEntity.addPairing(player);
+@@ -1448,6 +1472,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+                         }
+                         // Paper end - entity tracking events
+                         this.serverEntity.onPlayerAdd(); // Paper - fix desync when a player is added to the tracker
++                        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async tracker: serialise pairing changes
+                     }
+                 } else {
+                     this.removePlayer(player);

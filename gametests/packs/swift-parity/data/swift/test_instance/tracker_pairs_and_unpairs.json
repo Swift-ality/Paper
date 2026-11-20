@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:tracker_pairs_and_unpairs",
+  "environment": "swift:day",
+  "structure": "swift:platform",
+  "max_ticks": 200,
+  "setup_ticks": 0,
+  "required": true
+}

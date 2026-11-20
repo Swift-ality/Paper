@@ -68,6 +68,9 @@ public final class SwiftFakePlayer {
         final Connection connection = new Connection(PacketFlow.SERVERBOUND);
         final EmbeddedChannel channel = new EmbeddedChannel(connection);
         server.getPlayerList().placeNewPlayer(connection, player, cookie);
+        // a real connection is marked not-pending by ServerConnectionListener once it is live; a pending
+        // connection sends every packet at once from whatever thread asks, which real players never do
+        connection.isPending = false;
         player.setGameMode(GameType.SURVIVAL);
         final BlockPos at = helper.absolutePos(relativePos);
         player.teleportTo(at.getX() + 0.5, at.getY(), at.getZ() + 0.5);
@@ -109,6 +112,33 @@ public final class SwiftFakePlayer {
                         out.add(chat.content().getString());
                     }
                 }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Every packet the server has sent this player since the last drain (bundles flattened). Packets sent
+     * off the main thread wait in the connection's queue until the main thread flushes it; this flushes first.
+     */
+    public List<Packet<?>> drainPackets() {
+        try {
+            final java.lang.reflect.Method flush = net.minecraft.network.Connection.class.getDeclaredMethod("flushQueue");
+            flush.setAccessible(true);
+            flush.invoke(this.player.connection.connection);
+        } catch (final ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
+        this.channel.runPendingTasks();
+        final List<Packet<?>> out = new ArrayList<>();
+        Object msg;
+        while ((msg = this.channel.readOutbound()) != null) {
+            if (msg instanceof net.minecraft.network.protocol.BundlePacket<?> bundle) {
+                for (final Object sub : bundle.subPackets()) {
+                    out.add((Packet<?>) sub);
+                }
+            } else if (msg instanceof Packet<?> packet) {
+                out.add(packet);
             }
         }
         return out;

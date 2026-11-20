@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:tracker_moving_entities_reach_player",
+  "environment": "swift:day",
+  "structure": "swift:platform",
+  "max_ticks": 100,
+  "setup_ticks": 0,
+  "required": true
+}
