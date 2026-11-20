@@ -78,16 +78,35 @@ function joinBot (name) {
   })
 }
 
-/** Sends a console command and returns the console lines printed within `waitMs`. */
-async function command (proc, cmd, waitMs = 300) {
+/**
+ * Sends a console command and returns the console lines printed after it: once a line matches `until`
+ * (waiting at most `maxMs`; console commands run once per tick, which takes seconds on an overloaded
+ * server), or after `waitMs` when no `until` is given.
+ */
+async function command (proc, cmd, waitMs = 300, until = null, maxMs = 300_000) {
   const from = proc.lines.length
   proc.stdin.write(cmd + '\n')
-  await sleep(waitMs)
+  if (!until) {
+    await sleep(waitMs)
+    return proc.lines.slice(from)
+  }
+  const deadline = Date.now() + maxMs
+  while (Date.now() < deadline) {
+    if (proc.lines.slice(from).some(l => until.test(l))) {
+      await sleep(200)
+      return proc.lines.slice(from)
+    }
+    await sleep(100)
+  }
   return proc.lines.slice(from)
 }
 
+const TRIPLE = /\d+\.\d+\/\d+\.\d+\/\d+\.\d+/
+const COUNT = /Count: \d+|Test failed/
+const SPARK_URL = /https:\/\/spark\.lucko\.me\/[A-Za-z0-9]+/
+
 async function mspt (proc) {
-  const out = await command(proc, 'mspt', 800)
+  const out = await command(proc, 'mspt', 0, TRIPLE)
   // "◴ 1.2/0.9/3.4, 1.1/0.8/3.4, 1.2/0.8/5.0" = avg/min/max for 5 s, 10 s, 1 min
   const line = out.find(l => /\d+\.\d+\/\d+\.\d+\/\d+\.\d+/.test(l))
   if (!line) return null
@@ -129,23 +148,23 @@ async function runMode (mode) {
     }
   }
   await sleep(1000)
-  const count = (await command(proc, 'execute store result score #n dummy if entity @e[type=!player]', 500)).join(' ')
-  const entities = (await command(proc, 'execute if entity @e[type=!player]', 500)).find(l => /count|passed/i.test(l)) || count
+  const entities = (await command(proc, 'execute if entity @e[type=!player]', 0, COUNT)).find(l => COUNT.test(l)) || ''
   console.log(`[${mode}] ${n} mobs summoned (${entities.trim()}); warming up ${WARMUP_S}s`)
   await sleep(WARMUP_S * 1000)
   // spark: every thread (main + Swift entity workers), sleeping threads ignored; stopped (and uploaded) after the window
-  await command(proc, 'spark profiler start --thread * --ignore-sleeping', 1000)
+  await command(proc, 'spark profiler start --thread * --ignore-sleeping', 0, /[Pp]rofiler|spark/)
   const samples = []
-  for (let t = 0; t < MEASURE_S; t += 10) {
+  const windowEnd = Date.now() + MEASURE_S * 1000
+  while (Date.now() < windowEnd) {
     await sleep(10_000)
     const m = await mspt(proc)
     if (m) samples.push(m.s10[0])
   }
   const final = await mspt(proc)
-  const sparkOut = await command(proc, 'spark profiler stop', 15000)
-  const spark = (sparkOut.join(' ').match(/https:\/\/spark\.lucko\.me\/[A-Za-z0-9]+/) || [null])[0]
-  const tps = (await command(proc, 'tps', 800)).find(l => /TPS/.test(l)) || ''
-  const alive = (await command(proc, 'execute if entity @e[type=!player]', 500)).find(l => /count|passed/i.test(l)) || ''
+  const sparkOut = await command(proc, 'spark profiler stop', 0, SPARK_URL, 600_000)
+  const spark = (sparkOut.join(' ').match(SPARK_URL) || [null])[0]
+  const tps = (await command(proc, 'tps', 0, /TPS from last/)).find(l => /TPS/.test(l)) || ''
+  const alive = (await command(proc, 'execute if entity @e[type=!player]', 0, COUNT)).find(l => COUNT.test(l)) || ''
   bot.end()
   await command(proc, 'stop', 100)
   await new Promise(r => proc.on('exit', r))
