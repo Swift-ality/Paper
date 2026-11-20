@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 12:36:45 +0100
+Subject: [PATCH] Swift: Keep POI data briefly after a blocking load
+
+PoiManager#getOrLoad on a chunk without loaded POI data parks the main
+thread on a disk read (ChunkHolderManager#loadPoiChunk) and drops the
+ticket right away, so callers asking every tick re-read it every tick.
+Villagers whose job site is far away (PoiCompetitorScan, never
+invalidated at that distance) did exactly that: 192 blocking loads in
+200 ticks in a test, 0.54 ms/tick of waiting in profile qJwhW316qQ.
+
+After such a load, a timed swift:poi_retain ticket at MAX_TICKET_LEVEL
+(holder + POI data only, the chunk is not loaded) keeps the data for 600
+ticks. Same data either way. See io.papermc.paper.swift.poi.PoiRetention.
+Disable with -Dswift.poiRetain=false.
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
+index e984597384eba6b8ac877f2803bdbed754ac7ba8..670af11e6f3c566988f64a71097f637bc36ffa2a 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
+@@ -1140,6 +1140,7 @@ public final class ChunkHolderManager {
+         }
+ 
+         if (loadTask != null) {
++            io.papermc.paper.swift.poi.PoiRetention.BLOCKING_LOADS.incrementAndGet(); // Swift - keep POI data briefly after a blocking load
+             loadTask.schedule();
+ 
+             // Note: no need to busy wait on the chunk queue, poi load will complete off-main
+@@ -1159,6 +1160,11 @@ public final class ChunkHolderManager {
+ 
+         ret.load();
+ 
++        // Swift start - keep POI data briefly after a blocking load (timed ticket, holder + POI data only)
++        if (loadTask != null && io.papermc.paper.swift.poi.PoiRetention.enabled) {
++            this.addTicketAtLevel(ChunkTaskScheduler.SWIFT_POI_RETAIN, chunkX, chunkZ, MAX_TICKET_LEVEL, Long.valueOf(0L));
++        }
++        // Swift end - keep POI data briefly after a blocking load
+         this.removeTicketAtLevel(ChunkTaskScheduler.POI_LOAD, chunkX, chunkZ, MAX_TICKET_LEVEL, poiLoadId);
+ 
+         return ret;
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+index 130fc0ea8326ab406910b5429acd99ea91708db2..6cd014d27469162e299e3dc7c1afcba06bbb6fdd 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+@@ -88,6 +88,7 @@ public final class ChunkTaskScheduler {
+     }
+ 
+     public static final TicketType POI_LOAD = ChunkSystemTicketType.create("chunk_system:poi_load", Long::compareTo);
++    public static final TicketType SWIFT_POI_RETAIN = ChunkSystemTicketType.create("swift:poi_retain", Long::compareTo, io.papermc.paper.swift.poi.PoiRetention.RETAIN_TICKS); // Swift - keep POI data briefly after a blocking load
+     private static final AtomicLong POI_LOAD_IDS = new AtomicLong();
+ 
+     public static Long getNextPoiLoadId() {

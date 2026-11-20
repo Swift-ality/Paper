@@ -65,6 +65,12 @@ section walk itself remains, which item B targets.
 (63k checks, 0 mismatches); planted bugs (reversed groups, gate always true) are caught by verify,
 not by the behaviour tests, so verify runs are part of the release checklist from now on.
 
+**C shipped** (patch 0042, kill switch `-Dswift.poiRetain=false`). Reproduced first: a farmer with a job
+site 20000 blocks away caused 192 blocking POI disk loads in 200 ticks; with a 600-tick
+`swift:poi_retain` ticket (holder + POI data only) it causes 0 (at most one per 30 s). Test
+`poi_far_job_site` also checks the far chunk itself is never loaded (a planted full-level ticket is
+caught) and logs the post-load POI state, identical with the switch on and off.
+
 Tests to write first (green on current code), using fake players where a player is involved:
 - villager claims a bed within range; villager without a bed never claims one; **bed placed later is
   claimed** (the invalidation case for B); bed removed while claimed.

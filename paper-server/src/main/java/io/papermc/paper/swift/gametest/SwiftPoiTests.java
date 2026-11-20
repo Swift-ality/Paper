@@ -88,6 +88,53 @@ final class SwiftPoiTests {
             Component.literal("villager is " + villager.getVillagerData().profession().getRegisteredName() + ", expected farmer")));
     }
 
+    /**
+     * A farmer whose remembered job site is 20000 blocks away (in a chunk that is not loaded): it keeps its
+     * job and job site, and the far POI keeps reading back as a farmer POI. Logs how many blocking POI
+     * disk loads the villager's every-tick job-site check caused; with {@code PoiRetention} on that must
+     * stay small (one load per retention window instead of one per tick).
+     */
+    static void farJobSite(final GameTestHelper helper) {
+        watcher(helper);
+        final var level = helper.getLevel();
+        final BlockPos far = helper.absolutePos(new BlockPos(4, 1, 4)).offset(20_000, 0, 0);
+        final var farmerType = level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.POINT_OF_INTEREST_TYPE)
+            .getOrThrow(net.minecraft.world.entity.ai.village.poi.PoiTypes.FARMER);
+        level.getPoiManager().add(far, farmerType);
+        final Villager villager = villager(helper, new BlockPos(3, 1, 3));
+        villager.setVillagerData(villager.getVillagerData().withProfession(level.registryAccess(), VillagerProfession.FARMER));
+        villager.setVillagerXp(1);
+        villager.getBrain().setMemory(MemoryModuleType.JOB_SITE, GlobalPos.of(level.dimension(), far));
+        final long loadsBefore = io.papermc.paper.swift.poi.PoiRetention.BLOCKING_LOADS.get();
+        helper.runAfterDelay(200, () -> {
+            try {
+                final long loads = io.papermc.paper.swift.poi.PoiRetention.BLOCKING_LOADS.get() - loadsBefore;
+                org.slf4j.LoggerFactory.getLogger("SwiftGameTests").info("[SwiftGameTests] far job site: {} blocking POI loads in 200 ticks (retention {})",
+                    loads, io.papermc.paper.swift.poi.PoiRetention.enabled ? "on" : "off");
+                helper.assertTrue(villager.getBrain().getMemory(MemoryModuleType.JOB_SITE).map(GlobalPos::pos).filter(far::equals).isPresent(),
+                    Component.literal("villager lost its far job site"));
+                helper.assertTrue(villager.getVillagerData().profession().is(VillagerProfession.FARMER), Component.literal("villager lost its profession"));
+                helper.assertTrue(level.getPoiManager().getType(far).filter(t -> t.is(net.minecraft.world.entity.ai.village.poi.PoiTypes.FARMER)).isPresent(),
+                    Component.literal("far POI no longer reads as farmer"));
+                if (io.papermc.paper.swift.poi.PoiRetention.enabled) {
+                    helper.assertTrue(loads <= 10, Component.literal("POI retention on, but " + loads + " blocking loads in 200 ticks"));
+                }
+                // keeping POI data must never load the chunk itself (that would tick and spawn in it)
+                helper.assertTrue(level.getChunkSource().getChunkNow(far.getX() >> 4, far.getZ() >> 4) == null,
+                    Component.literal("the far job-site chunk is loaded"));
+                // Loading the far chunk fully afterwards: Paper keeps this block-less POI (checked 2026-11-20 with
+                // retention off and on, same result). Logged so both modes can be compared.
+                level.getChunk(far.getX() >> 4, far.getZ() >> 4);
+                org.slf4j.LoggerFactory.getLogger("SwiftGameTests").info("[SwiftGameTests] far job site after full chunk load: POI {}",
+                    level.getPoiManager().getType(far).map(h -> h.getRegisteredName()).orElse("none"));
+                helper.succeed();
+            } finally {
+                level.getPoiManager().remove(far);
+                SwiftFakePlayer.leaveAll(helper);
+            }
+        });
+    }
+
     /** Two unemployed villagers, one lectern: exactly one becomes a librarian, the other stays unemployed. */
     static void oneWorkstationTwoVillagers(final GameTestHelper helper) {
         watcher(helper);
