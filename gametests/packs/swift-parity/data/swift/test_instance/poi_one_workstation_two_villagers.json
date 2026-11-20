@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:poi_one_workstation_two_villagers",
+  "environment": "swift:day",
+  "structure": "swift:platform",
+  "max_ticks": 1200,
+  "setup_ticks": 0,
+  "required": true
+}

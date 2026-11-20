@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 12:08:36 +0100
+Subject: [PATCH] Swift: Use the level's clock in the GameTest clock_time
+ environment
+
+Paper keeps time per world (ServerLevel#clockManager), but the test
+environment set the server-wide clock, so clock_time never reached the
+level the tests run in (villagers stayed in their night schedule).
+Test framework only; no gameplay change.
+
+diff --git a/net/minecraft/gametest/framework/TestEnvironmentDefinition.java b/net/minecraft/gametest/framework/TestEnvironmentDefinition.java
+index 58dd562fad900466a572e6b2fb429e338e817916..5e7f29ba82ed905bc8f8faf842a5c228d4c214ba 100644
+--- a/net/minecraft/gametest/framework/TestEnvironmentDefinition.java
++++ b/net/minecraft/gametest/framework/TestEnvironmentDefinition.java
+@@ -116,15 +116,15 @@ public interface TestEnvironmentDefinition<SavedDataType> {
+         @Override
+         public Long setup(final ServerLevel level) {
+             MinecraftServer server = level.getServer();
+-            long previous = server.clockManager().getInstance(this.clock).totalTicks();
+-            server.clockManager().setTotalTicks(this.clock, this.time);
++            long previous = level.clockManager().getInstance(this.clock).totalTicks(); // Swift - Paper keeps time per world: set the level's clock, not the server's
++            level.clockManager().setTotalTicks(this.clock, this.time); // Swift - per-world time
+             return previous;
+         }
+ 
+         @Override
+         public void teardown(final ServerLevel level, final Long saveData) {
+             MinecraftServer server = level.getServer();
+-            server.clockManager().setTotalTicks(this.clock, saveData);
++            level.clockManager().setTotalTicks(this.clock, saveData); // Swift - per-world time
+         }
+ 
+         @Override

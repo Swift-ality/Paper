@@ -42,6 +42,10 @@ public final class SwiftTestFunctions implements TestFunctionLoader {
         register.accept(key("bench_world_selector"), SwiftSelectorBenchmark::bench);
         register.accept(key("selector_tag_matrix"), SwiftTagSelectorTests::matrix);
         register.accept(key("fake_player_basics"), SwiftPlayerCommandTests::basics);
+        register.accept(key("poi_villager_claims_bed"), SwiftPoiTests::claimsBed);
+        register.accept(key("poi_villager_claims_bed_placed_later"), SwiftPoiTests::claimsBedPlacedLater);
+        register.accept(key("poi_villager_takes_job"), SwiftPoiTests::takesJob);
+        register.accept(key("poi_one_workstation_two_villagers"), SwiftPoiTests::oneWorkstationTwoVillagers);
         register.accept(key("fake_player_tag_scenario"), SwiftPlayerCommandTests::tagScenario);
     }
 
