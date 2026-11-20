@@ -206,6 +206,7 @@ public class Main {
                 System.setProperty("library.jansi.version", "Paper"); // Paper - set meaningless jansi version to prevent git builds from crashing on Windows
                 System.setProperty("jdk.console", "java.base"); // Paper - revert default console provider back to java.base so we can have our own jline
 
+                io.papermc.paper.swift.SwiftConfig.load((File) options.valueOf("paper-settings-directory")); // Swift - config/swift.yml, before any switch is read
                 io.papermc.paper.swift.gametest.SwiftGameTests.registerFunctions(); // Swift - gameplay-parity tests (inert unless -Dswift.gametest)
                 io.papermc.paper.PaperBootstrap.boot(options);
             } catch (Throwable t) {
