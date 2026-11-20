@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:bench_poi_hall_searches",
+  "environment": "swift:day",
+  "structure": "swift:platform",
+  "max_ticks": 600,
+  "setup_ticks": 0,
+  "required": false
+}

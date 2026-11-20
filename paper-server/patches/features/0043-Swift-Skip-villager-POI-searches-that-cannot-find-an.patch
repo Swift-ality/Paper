@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 12:56:14 +0100
+Subject: [PATCH] Swift: Skip villager POI searches that cannot find anything
+
+AcquirePoi (bed / job site / meeting point) searches 48 blocks every
+20-40 ticks per villager and in trading halls almost never finds
+anything. Remember a search that found no candidate at all (the position
+predicate, which has side effects, was never called) per behaviour
+instance, keyed on world, source block and the sum of per-chunk POI
+change counters over the search box (bumped in PoiManager#setDirty, which
+every POI add/remove/refresh and ticket change goes through; counters
+never decrease). A repeat search from the same block with an unchanged
+sum is skipped: same empty result, no side effect skipped. RNG use,
+retry-marker cleanup and the path step are untouched.
+
+-Dswift.verify=true still runs every skipped search and reports any that
+would have seen a candidate. Disable with -Dswift.poiEmptySearchCache=false.
+
+Hall of 30 wandering villagers, 400 ticks: 1353 searches -> 597 run,
+724 skipped.
+
+diff --git a/net/minecraft/world/entity/ai/behavior/AcquirePoi.java b/net/minecraft/world/entity/ai/behavior/AcquirePoi.java
+index 019a5cbef59465147cbc59e2b8580624cac379e8..a909acc83428853ff7d4a4466a0d624e48e1dccc 100644
+--- a/net/minecraft/world/entity/ai/behavior/AcquirePoi.java
++++ b/net/minecraft/world/entity/ai/behavior/AcquirePoi.java
+@@ -58,6 +58,7 @@ public class AcquirePoi {
+         int rate = 20;
+         MutableLong nextScheduledStart = new MutableLong(0L);
+         Long2ObjectMap<AcquirePoi.JitteredLinearRetry> batchCache = new Long2ObjectOpenHashMap<>();
++        io.papermc.paper.swift.poi.EmptySearchCache swiftEmptySearch = new io.papermc.paper.swift.poi.EmptySearchCache(); // Swift - skip searches that cannot find anything
+         OneShot<PathfinderMob> acquirePoi = BehaviorBuilder.create(
+             i -> i.group(i.absent(memoryToAcquire))
+                 .apply(
+@@ -96,7 +97,27 @@ public class AcquirePoi {
+                         };
+                         // Paper start - optimise POI searches
+                         java.util.List<Pair<Holder<PoiType>, BlockPos>> poiPositionsRaw = new java.util.ArrayList<>();
+-                        ca.spottedleaf.moonrise.patches.poi_lookup.PoiAccess.findNearestPoiPositions(poiManager, poiType, cacheTest, body.blockPosition(), SCAN_RANGE, (double)((long)SCAN_RANGE * (long)SCAN_RANGE), PoiManager.Occupancy.HAS_SPACE, ca.spottedleaf.moonrise.patches.poi_lookup.PoiAccess.LOAD_FOR_SEARCHING, 5, poiPositionsRaw);
++                        // Swift start - skip searches that cannot find anything: same empty result, no side effect skipped
++                        final BlockPos swiftFrom = body.blockPosition();
++                        final boolean swiftSkip = swiftEmptySearch.canSkip(poiManager, swiftFrom, SCAN_RANGE);
++                        if (!swiftSkip || io.papermc.paper.swift.SwiftVerify.ENABLED) {
++                            final int[] swiftCandidates = new int[1];
++                            final Predicate<BlockPos> swiftCountingTest = pos -> {
++                                swiftCandidates[0]++;
++                                return cacheTest.test(pos);
++                            };
++                        ca.spottedleaf.moonrise.patches.poi_lookup.PoiAccess.findNearestPoiPositions(poiManager, poiType, swiftCountingTest, swiftFrom, SCAN_RANGE, (double)((long)SCAN_RANGE * (long)SCAN_RANGE), PoiManager.Occupancy.HAS_SPACE, ca.spottedleaf.moonrise.patches.poi_lookup.PoiAccess.LOAD_FOR_SEARCHING, 5, poiPositionsRaw);
++                            final boolean swiftNoCandidates = swiftCandidates[0] == 0 && poiPositionsRaw.isEmpty();
++                            if (swiftSkip) {
++                                io.papermc.paper.swift.SwiftVerify.checked();
++                                if (!swiftNoCandidates) {
++                                    io.papermc.paper.swift.SwiftVerify.mismatch("AcquirePoi empty-search cache", "skip predicted at " + swiftFrom + " but search saw "
++                                        + swiftCandidates[0] + " candidates, " + poiPositionsRaw.size() + " results");
++                                }
++                            }
++                            swiftEmptySearch.record(poiManager, swiftFrom, SCAN_RANGE, swiftNoCandidates);
++                        }
++                        // Swift end - skip searches that cannot find anything
+                         Set<Pair<Holder<PoiType>, BlockPos>> poiPositions = new java.util.HashSet<>(poiPositionsRaw.size());
+                         for (Pair<Holder<PoiType>, BlockPos> pair : poiPositionsRaw) {
+                             if (validPoi.test(level, pair.getSecond())) {
+diff --git a/net/minecraft/world/entity/ai/village/poi/PoiManager.java b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+index 3b07e731e8d16c2b71cb55b85163029cf56fd02e..c97c39519b838b8e54b6350b20d54f730bfa752f 100644
+--- a/net/minecraft/world/entity/ai/village/poi/PoiManager.java
++++ b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+@@ -437,8 +437,29 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+         this.villageDistanceTracker.propagateUpdates(); // Paper - rewrite chunk system
+     }
+ 
++    // Swift start - per-chunk POI change counters (see io.papermc.paper.swift.poi.EmptySearchCache)
++    private final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap swift$poiChanges = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
++
++    /** Sum of the never-decreasing change counters of every chunk column a POI search of this range from pos can look at. */
++    public long swift$poiChangeVersion(final BlockPos pos, final int range) {
++        final int lowerX = net.minecraft.util.Mth.floor(pos.getX() - range) >> 4;
++        final int upperX = net.minecraft.util.Mth.floor(pos.getX() + range) >> 4;
++        final int lowerZ = net.minecraft.util.Mth.floor(pos.getZ() - range) >> 4;
++        final int upperZ = net.minecraft.util.Mth.floor(pos.getZ() + range) >> 4;
++        long sum = 0L;
++        for (int x = lowerX; x <= upperX; ++x) {
++            for (int z = lowerZ; z <= upperZ; ++z) {
++                sum += this.swift$poiChanges.get(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(x, z));
++            }
++        }
++        return sum;
++    }
++    // Swift end - per-chunk POI change counters
++
+     @Override
+     public void setDirty(final long sectionPos) { // Paper - public
++        this.swift$poiChanges.addTo(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey( // Swift - per-chunk POI change counters
++            ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionX(sectionPos), ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionZ(sectionPos)), 1L); // Swift - per-chunk POI change counters
+         // Paper start - rewrite chunk system
+         final int chunkX = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionX(sectionPos);
+         final int chunkZ = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionZ(sectionPos);

@@ -161,6 +161,52 @@ final class SwiftPoiTests {
         });
     }
 
+    /**
+     * Trading-hall setup: a villager locked in a one-block glass cell searches from the same block for a
+     * while (finding nothing), then a lectern replaces one wall block and it must become a librarian.
+     * This is the case where "nothing to find from here" is remembered longest.
+     */
+    static void lockedVillagerTakesJobPlacedLater(final GameTestHelper helper) {
+        watcher(helper);
+        final BlockPos cell = new BlockPos(4, 1, 4);
+        for (final BlockPos wall : new BlockPos[] {cell.west(), cell.east(), cell.north(), cell.south()}) {
+            helper.setBlock(wall, Blocks.GLASS);
+            helper.setBlock(wall.above(), Blocks.GLASS);
+        }
+        helper.setBlock(cell.above(2), Blocks.GLASS);
+        final Villager villager = villager(helper, cell);
+        helper.runAfterDelay(200, () -> {
+            if (!villager.getVillagerData().profession().is(VillagerProfession.NONE)) {
+                helper.fail(Component.literal("villager has a profession before any workstation exists"));
+                return;
+            }
+            helper.setBlock(cell.east(), Blocks.LECTERN);
+            succeedWhen(helper, () -> helper.assertTrue(villager.getVillagerData().profession().is(VillagerProfession.LIBRARIAN),
+                Component.literal("locked villager did not take the lectern placed next to it (" + villager.getVillagerData().profession().getRegisteredName() + ")")));
+        });
+    }
+
+    /**
+     * Optional, trading-hall shape: 30 villagers without beds or workstations for 400 ticks. Logs how many
+     * AcquirePoi searches ran and how many were skipped by the empty-search cache.
+     */
+    static void hallSearches(final GameTestHelper helper) {
+        watcher(helper);
+        for (int i = 0; i < 30; i++) {
+            final Villager v = villager(helper, new BlockPos(1 + i % 7, 1, 1 + (i / 7) % 7));
+            v.setNoAi(false);
+        }
+        final long searches = io.papermc.paper.swift.poi.EmptySearchCache.SEARCHES.get();
+        final long skips = io.papermc.paper.swift.poi.EmptySearchCache.SKIPS.get();
+        helper.runAfterDelay(400, () -> {
+            org.slf4j.LoggerFactory.getLogger("SwiftGameTests").info("[SwiftGameTests] hall of 30 villagers, 400 ticks: {} POI searches run, {} skipped (cache {})",
+                io.papermc.paper.swift.poi.EmptySearchCache.SEARCHES.get() - searches, io.papermc.paper.swift.poi.EmptySearchCache.SKIPS.get() - skips,
+                io.papermc.paper.swift.poi.EmptySearchCache.enabled ? "on" : "off");
+            SwiftFakePlayer.leaveAll(helper);
+            helper.succeed();
+        });
+    }
+
     /** Two unemployed villagers, one lectern: exactly one becomes a librarian, the other stays unemployed. */
     static void oneWorkstationTwoVillagers(final GameTestHelper helper) {
         watcher(helper);

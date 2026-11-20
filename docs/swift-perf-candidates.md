@@ -71,6 +71,14 @@ site 20000 blocks away caused 192 blocking POI disk loads in 200 ticks; with a 6
 `poi_far_job_site` also checks the far chunk itself is never loaded (a planted full-level ticket is
 caught) and logs the post-load POI state, identical with the switch on and off.
 
+**B shipped** (patch 0043, kill switch `-Dswift.poiEmptySearchCache=false`). Per behaviour instance:
+remember a search that saw no candidate at all, keyed on world + source block + sum of per-chunk POI
+change counters (bumped in `PoiManager#setDirty`). Hall of 30 wandering villagers, 400 ticks: about
+half the searches skipped (1353 -> ~600-700 run); locked trading-hall villagers search from one block,
+so they should skip nearly all. Verify re-runs every skipped search (89k checks, 0 mismatches). A
+planted "no counter bump" is caught by `poi_locked_villager_takes_job_placed_later` (and by verify);
+`poi_villager_claims_bed_freed_later` covers ticket releases.
+
 Tests to write first (green on current code), using fake players where a player is involved:
 - villager claims a bed within range; villager without a bed never claims one; **bed placed later is
   claimed** (the invalidation case for B); bed removed while claimed.
