@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 17:38:52 +0100
+Subject: [PATCH] Swift: Skip spawn cost lookups that can only be null
+
+NaturalSpawner samples NATURAL_MOB_SPAWNS (biome-layered environment
+attribute) only to read getMobSpawnCost(type): per counted mob per tick in
+createState, per spawn attempt in SpawnState#canSpawn, and after a spawn.
+Every MobSpawnSettings constructor now registers the entity types it has
+costs for (grow-only, thread-safe set); for a type never registered no
+MobSpawnSettings anywhere has a cost, so the side-effect-free lookup can
+only return null and is skipped. -Dswift.verify=true performs every skipped
+lookup and reports any non-null answer. Disable with -Dswift.spawnCostSkip=false.
+
+Profile GhlizX39EE: the lookup was 2.6 of 3.8 ms/tick in createState.
+Benchmark (300 counted mobs): createState 30 -> 6 us (~5x).
+
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 06c63a3429d010546c8b9de610cbae7bf6bb6935..60a6d1b881e0f8db0269f394af3c787639c15ef2 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -97,8 +97,7 @@ public final class NaturalSpawner {
+                     // Paper end - Only count natural spawns
+                     BlockPos pos = entity.blockPosition();
+                     chunkGetter.query(ChunkPos.pack(pos), chunk -> {
+-                        MobSpawnSettings naturalMobSpawns = level.environmentAttributes().getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, pos);
+-                        MobSpawnSettings.MobSpawnCost mobSpawnCost = naturalMobSpawns.getMobSpawnCost(entity.getType());
++                        MobSpawnSettings.MobSpawnCost mobSpawnCost = io.papermc.paper.swift.spawn.SpawnCosts.cost(level.environmentAttributes(), entity.getType(), pos); // Swift - skip spawn cost lookups that can only be null
+                         if (mobSpawnCost != null) {
+                             spawnPotential.addCharge(entity.blockPosition(), mobSpawnCost.charge());
+                         }
+@@ -634,8 +633,7 @@ public final class NaturalSpawner {
+         private boolean canSpawn(final EntityType<?> type, final Level level, final BlockPos testPos, final ChunkAccess chunk) {
+             this.lastCheckedPos = testPos;
+             this.lastCheckedType = type;
+-            MobSpawnSettings naturalMobSpawns = level.environmentAttributes().getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, testPos);
+-            MobSpawnSettings.MobSpawnCost mobSpawnCost = naturalMobSpawns.getMobSpawnCost(type);
++            MobSpawnSettings.MobSpawnCost mobSpawnCost = io.papermc.paper.swift.spawn.SpawnCosts.cost(level.environmentAttributes(), type, testPos); // Swift - skip spawn cost lookups that can only be null
+             if (mobSpawnCost == null) {
+                 this.lastCharge = 0.0;
+                 return true;
+@@ -654,8 +652,7 @@ public final class NaturalSpawner {
+             if (pos.equals(this.lastCheckedPos) && type == this.lastCheckedType) {
+                 charge = this.lastCharge;
+             } else {
+-                MobSpawnSettings naturalMobSpawns = mob.level().environmentAttributes().getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, pos);
+-                MobSpawnSettings.MobSpawnCost mobSpawnCost = naturalMobSpawns.getMobSpawnCost(type);
++                MobSpawnSettings.MobSpawnCost mobSpawnCost = io.papermc.paper.swift.spawn.SpawnCosts.cost(mob.level().environmentAttributes(), type, pos); // Swift - skip spawn cost lookups that can only be null
+                 if (mobSpawnCost != null) {
+                     charge = mobSpawnCost.charge();
+                 } else {
+diff --git a/net/minecraft/world/level/biome/MobSpawnSettings.java b/net/minecraft/world/level/biome/MobSpawnSettings.java
+index f386dc61780326705f7fe0078a49474ebbd38bca..9a260edb191df7553f92243a1b4d792d99f2b8d6 100644
+--- a/net/minecraft/world/level/biome/MobSpawnSettings.java
++++ b/net/minecraft/world/level/biome/MobSpawnSettings.java
+@@ -62,6 +62,7 @@ public class MobSpawnSettings {
+     ) {
+         this.spawnsByCategory = ImmutableMap.copyOf(spawnsByCategory);
+         this.mobSpawnCosts = ImmutableMap.copyOf(mobSpawnCosts);
++        io.papermc.paper.swift.spawn.SpawnCosts.register(this.mobSpawnCosts.keySet()); // Swift - skip spawn cost lookups that can only be null
+     }
+ 
+     public WeightedList<MobSpawnSettings.SpawnerData> getMobsToSpawn(final MobCategory category) {
