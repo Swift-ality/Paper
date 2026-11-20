@@ -9,6 +9,7 @@ vanilla behaviour down so an optimisation that changes it fails the build.
 ./gradlew :paper-server:runGameTests -PgameTestKeepWorld=true
 ./gradlew :paper-server:runGameTests -PgameTestJvmArgs="-Dswift.nbtKeyFilter=false"   # suite with a change switched off
 ./gradlew :paper-server:runGameTests -PgameTestJvmArgs=-Dswift.verify=true          # shadow verify (see below)
+./gradlew :paper-server:runGameTests -PgameTestJvmArgs="-Dswift.asyncEntities=true -Dswift.asyncEntities.minParallel=1"   # parallel entity ticking (patch 0045)
 ```
 
 The task boots a real Paper server (full CraftBukkit) from the dev classpath in
@@ -133,3 +134,13 @@ Gotchas found while building this:
 - Villagers only walk to a workstation in their day schedule; use `swift:day` for job tests.
 - `-PgameTests` takes one selector; comma lists silently match fewer tests. Run mutation checks
   against the whole suite.
+
+## Parallel entity ticking (patch 0045)
+
+`-Dswift.asyncEntities=true` ticks mobs on worker threads. That changes the order in which mobs act inside a
+tick, so its tests (`SwiftAsyncTests`, `swift:async_*`) check what must hold in any order: no entity tick
+throws, the entity storage stays consistent, nothing is duplicated (items, births, workstation claims), and
+workers can load chunks without deadlock. Run the whole suite in this mode with `minParallel=1` (so even
+small tests tick in parallel) **several times**: races are probabilistic, a single clean run proves little.
+All other tests must pass in this mode too. `swift:bench_async_entities` (optional) measures serial vs
+parallel on 300 villagers.

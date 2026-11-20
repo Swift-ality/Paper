@@ -1,0 +1,538 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 21:41:03 +0100
+Subject: [PATCH] Swift: Parallel entity ticking (Async-style, off by default)
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
+index 5b7ed8e5067683143c99473a126e17baa531903c..7d9b040b4784be83fee7a5dd55fad74a941bddc8 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
+@@ -49,8 +49,26 @@ public final class ChunkEntitySlices {
+ 
+     private final EntityCollectionBySection allEntities;
+     private final EntityCollectionBySection hardCollidingEntities;
+-    private final Reference2ObjectOpenHashMap<Class<? extends Entity>, EntityCollectionBySection> entitiesByClass;
+-    private final Reference2ObjectOpenHashMap<EntityType<?>, EntityCollectionBySection> entitiesByType;
++    // Swift start - async entities: copy-on-write, searches on other threads may read while a key is added
++    private volatile Reference2ObjectOpenHashMap<Class<? extends Entity>, EntityCollectionBySection> entitiesByClass;
++    private volatile Reference2ObjectOpenHashMap<EntityType<?>, EntityCollectionBySection> entitiesByType;
++
++    private EntityCollectionBySection swift$classCollection(final Class<? extends Entity> clazz) {
++        final boolean held = io.papermc.paper.swift.async.SwiftAsync.lock();
++        try {
++            EntityCollectionBySection collection = this.entitiesByClass.get(clazz);
++            if (collection == null) {
++                collection = this.initClass(clazz);
++                final Reference2ObjectOpenHashMap<Class<? extends Entity>, EntityCollectionBySection> copy = new Reference2ObjectOpenHashMap<>(this.entitiesByClass);
++                copy.put(clazz, collection);
++                this.entitiesByClass = copy;
++            }
++            return collection;
++        } finally {
++            io.papermc.paper.swift.async.SwiftAsync.unlock(held);
++        }
++    }
++    // Swift end - async entities
+     private final EntityList entities = new EntityList();
+ 
+     public FullChunkStatus status;
+@@ -283,7 +301,9 @@ public final class ChunkEntitySlices {
+         if (byType != null) {
+             byType.addEntity(entity, sectionIndex);
+         } else {
+-            this.entitiesByType.put(entity.getType(), byType = new EntityCollectionBySection(this));
++            final Reference2ObjectOpenHashMap<EntityType<?>, EntityCollectionBySection> copy = new Reference2ObjectOpenHashMap<>(this.entitiesByType); // Swift - async entities: copy-on-write
++            copy.put(entity.getType(), byType = new EntityCollectionBySection(this)); // Swift - async entities
++            this.entitiesByType = copy; // Swift - async entities
+             byType.addEntity(entity, sectionIndex);
+         }
+ 
+@@ -382,7 +402,7 @@ public final class ChunkEntitySlices {
+         if (collection != null) {
+             collection.getEntities(except, box, (List)into, (Predicate)predicate);
+         } else {
+-            this.entitiesByClass.put(clazz, collection = this.initClass(clazz));
++            collection = this.swift$classCollection(clazz); // Swift - async entities
+             collection.getEntities(except, box, (List)into, (Predicate)predicate);
+         }
+     }
+@@ -393,7 +413,7 @@ public final class ChunkEntitySlices {
+         if (collection != null) {
+             return collection.getEntitiesLimited(except, box, (List)into, (Predicate)predicate, maxCount);
+         } else {
+-            this.entitiesByClass.put(clazz, collection = this.initClass(clazz));
++            collection = this.swift$classCollection(clazz); // Swift - async entities
+             return collection.getEntitiesLimited(except, box, (List)into, (Predicate)predicate, maxCount);
+         }
+     }
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+index 7bff90cf6f55eb9a037e66b2a922210b44ed7339..045057704ed788bd020c101d97921141e4b2395c 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+@@ -275,6 +275,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+     public void entityStatusChange(final Entity entity, final ChunkEntitySlices slices, final Visibility oldVisibility, final Visibility newVisibility, final boolean moved,
+                                    final boolean created, final boolean destroyed) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         this.checkThread(entity, "Entity status change must only happen on the main thread");
+ 
+         if (((ChunkSystemEntity)entity).moonrise$isUpdatingSectionStatus()) {
+@@ -370,6 +371,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+                 slices.stopPreventingStatusUpdates(false);
+             }
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public void chunkStatusChange(final int x, final int z, final FullChunkStatus newStatus) {
+@@ -444,6 +446,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+     }
+ 
+     protected boolean addEntity(final Entity entity, final boolean fromDisk, final boolean event) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         final BlockPos pos = entity.blockPosition();
+         final int sectionX = pos.getX() >> 4;
+         final int sectionY = Mth.clamp(pos.getY() >> 4, WorldUtil.getMinSection(this.world), WorldUtil.getMaxSection(this.world));
+@@ -495,6 +498,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         this.entityStatusChange(entity, slices, Visibility.HIDDEN, getEntityStatus(entity), false, !fromDisk, false);
+ 
+         return true;
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public boolean canRemoveEntity(final Entity entity) {
+@@ -509,6 +513,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+     }
+ 
+     protected void removeEntity(final Entity entity) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         final int sectionX = ((ChunkSystemEntity)entity).moonrise$getSectionX();
+         final int sectionY = ((ChunkSystemEntity)entity).moonrise$getSectionY();
+         final int sectionZ = ((ChunkSystemEntity)entity).moonrise$getSectionZ();
+@@ -558,6 +563,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         if (slices != null && slices.isEmpty()) {
+             this.onEmptySlices(sectionX, sectionZ);
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     protected ChunkEntitySlices moveEntity(final Entity entity) {
+@@ -575,6 +581,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         if (newSectionX == sectionX && newSectionY == sectionY && newSectionZ == sectionZ) {
+             return null;
+         }
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+ 
+         // ensure the new section is owned by this tick thread
+         this.checkThread(newSectionX, newSectionZ, "Cannot move entity off-main");
+@@ -608,6 +615,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         );
+ 
+         return slices;
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public void getEntities(final Entity except, final AABB box, final List<Entity> into, final Predicate<? super Entity> predicate) {
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index ef53d4d17222a882dd3d33575096c864a0a00a06..4335daae7ac48a1ad533170b83dff5e63787d15c 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -104,6 +104,9 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     }
+ 
+     private ChunkAccess syncLoad(final int chunkX, final int chunkZ, final ChunkStatus toStatus) {
++        if (io.papermc.paper.swift.async.SwiftAsync.parallel && io.papermc.paper.swift.async.SwiftAsync.isWorker()) { // Swift - async entities: the main thread drains the chunk queue
++            return io.papermc.paper.swift.async.SwiftAsync.callOnMain(() -> this.syncLoad(chunkX, chunkZ, toStatus));
++        }
+         final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler chunkTaskScheduler = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.level).moonrise$getChunkTaskScheduler();
+         final CompletableFuture<ChunkAccess> completable = new CompletableFuture<>();
+         chunkTaskScheduler.scheduleChunkLoad(
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index c7aca4fb8fbfea24d59559730c68365ec33bf548..a3b2a371e427e1ffb0a194b0d9c54eea22e94bef 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -890,8 +890,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+ 
+             io.papermc.paper.entity.activation.ActivationRange.activateEntities(this); // Paper - EAR
+-            this.entityTickList
+-                .forEach(
++            // Swift start - async entities: parallel entity ticking (off unless -Dswift.asyncEntities=true)
++            final java.util.function.Consumer<Entity> swift$tickOne =
+                     entity -> {
+                         if (!entity.isRemoved()) {
+                             if (!tickRateManager.isEntityFrozen(entity)) {
+@@ -914,8 +914,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                                 }
+                             }
+                         }
+-                    }
+-                );
++                    };
++            if (io.papermc.paper.swift.async.SwiftAsync.enabled) {
++                final java.util.List<Entity> swift$entities = new java.util.ArrayList<>();
++                this.entityTickList.forEach(swift$entities::add);
++                io.papermc.paper.swift.async.SwiftAsync.tickEntities(this, swift$entities, swift$tickOne);
++            } else {
++                this.entityTickList.forEach(swift$tickOne);
++            }
++            // Swift end - async entities
+             if (this.paperConfig().unsupportedSettings.ticking.blockEntities) { // Paper - option to disable ticking
+             profiler.popPush("blockEntities");
+             this.tickBlockEntities();
+@@ -1866,12 +1873,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+     @Override
+     public void gameEvent(final Holder<GameEvent> gameEvent, final Vec3 position, final GameEvent.Context context) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         // Paper start - Prevent GameEvents being fired from unloaded chunks
+         if (this.getChunkIfLoadedImmediately((Mth.floor(position.x) >> 4), (Mth.floor(position.z) >> 4)) == null) {
+             return;
+         }
+         // Paper end - Prevent GameEvents being fired from unloaded chunks
+         this.gameEventDispatcher.post(gameEvent, position, context);
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     @Override
+@@ -2023,6 +2032,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final Holder<SoundEvent> explosionSound,
+         java.util.function.@Nullable Consumer<ServerExplosion> configurator
+     ) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         // CraftBukkit end
+         Explosion.BlockInteraction blockInteraction = switch (interactionType) {
+             case NONE -> Explosion.BlockInteraction.KEEP;
+@@ -2058,6 +2068,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         }
+ 
+         return explosion; // CraftBukkit
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     private Explosion.BlockInteraction getDestroyType(final GameRule<Boolean> gameRule) {
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index cfcc9945712e43ecd1834a2f04d878ba5520d779..77b55205550c003baa7cd1adbd572186d47dc84e 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -5059,11 +5059,12 @@ public abstract class Entity
+     }
+ 
+     public BlockState getInBlockState() {
+-        if (this.inBlockState == null) {
+-            this.inBlockState = this.level().getBlockState(this.blockPosition());
++        BlockState state = this.inBlockState; // Swift - async entities: read the cache once, other threads may reset it
++        if (state == null) {
++            this.inBlockState = state = this.level().getBlockState(this.blockPosition()); // Swift - async entities
+         }
+ 
+-        return this.inBlockState;
++        return state; // Swift - async entities
+     }
+ 
+     public ChunkPos chunkPosition() {
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index a0d10e4c3f78128029125bae8e8e476208f28d42..f5c999d5fb3870facae5a998fc758700e5a9b474 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -1440,6 +1440,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     @Override
+     public boolean hurtServer(final ServerLevel level, final DamageSource source, float damage) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         if (this.isInvulnerableTo(level, source)) {
+             return false;
+         }
+@@ -1573,6 +1574,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         }
+ 
+         return success;
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public void dealDefaultKnockback(final DamageSource source, final float damage, final boolean blocked) {
+diff --git a/net/minecraft/world/entity/Mob.java b/net/minecraft/world/entity/Mob.java
+index 92ce15b22517bda5033e6377c76abaa6a9d68d03..169cc606f8a16881baec8bbd2fff2742f623d3e0 100644
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -557,7 +557,10 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+                         continue;
+                     }
+                     // Paper end - Item#canEntityPickup
++                    final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
++                    if (!swift$held || (!entity.isRemoved() && !entity.getItem().isEmpty())) // Swift - async entities: another mob may have taken it
+                     this.pickUpItem(serverLevel, entity);
++                    } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+                 }
+             }
+         }
+@@ -1615,6 +1618,7 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+ 
+     @Override
+     public boolean doHurtTarget(final ServerLevel level, final Entity target) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         float dmg = (float)this.getAttributeValue(Attributes.ATTACK_DAMAGE);
+         ItemStack weaponItem = this.getWeaponItem();
+         DamageSource damageSource = weaponItem.getDamageSource(this);
+@@ -1635,6 +1639,7 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+ 
+         this.postPiercingAttack();
+         return wasHurt;
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     @Override
+diff --git a/net/minecraft/world/entity/ai/behavior/AnimalMakeLove.java b/net/minecraft/world/entity/ai/behavior/AnimalMakeLove.java
+index 142d70f554fd2804aa6aeec39836d601799653c0..260f55c290c3896427e014f9e7c5ce86df8ac303 100644
+--- a/net/minecraft/world/entity/ai/behavior/AnimalMakeLove.java
++++ b/net/minecraft/world/entity/ai/behavior/AnimalMakeLove.java
+@@ -80,7 +80,9 @@ public class AnimalMakeLove extends Behavior<Animal> {
+         BehaviorUtils.lockGazeAndWalkToEachOther(body, partner, this.speedModifier, this.closeEnoughDistance);
+         if (body.closerThan(partner, BREED_RANGE)) {
+             if (timestamp >= this.spawnChildAtTime) {
++                final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+                 body.spawnChildFromBreeding(level, partner);
++                } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+                 body.getBrain().eraseMemory(MemoryModuleType.BREED_TARGET);
+                 partner.getBrain().eraseMemory(MemoryModuleType.BREED_TARGET);
+             }
+diff --git a/net/minecraft/world/entity/ai/behavior/VillagerMakeLove.java b/net/minecraft/world/entity/ai/behavior/VillagerMakeLove.java
+index 979b537bb459898a501af86280fa313ac58510b2..4feb1e43e17f2129d93b71014dda788964d46f94 100644
+--- a/net/minecraft/world/entity/ai/behavior/VillagerMakeLove.java
++++ b/net/minecraft/world/entity/ai/behavior/VillagerMakeLove.java
+@@ -67,6 +67,7 @@ public class VillagerMakeLove extends Behavior<Villager> {
+     }
+ 
+     private void tryToGiveBirth(final ServerLevel level, final Villager body, final Villager target) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         Optional<BlockPos> childsBed = this.takeVacantBed(level, body);
+         if (childsBed.isEmpty()) {
+             level.broadcastEntityEvent(target, EntityEvent.VILLAGER_ANGRY);
+@@ -80,6 +81,7 @@ public class VillagerMakeLove extends Behavior<Villager> {
+                 level.debugSynchronizers().updatePoi(childsBed.get());
+             }
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     @Override
+diff --git a/net/minecraft/world/entity/ai/goal/BreedGoal.java b/net/minecraft/world/entity/ai/goal/BreedGoal.java
+index a98d058d7ff97e72916df4c021d100ec04cb3d45..c2e33ee39bc52a653e716878a8f4b369b5166619 100644
+--- a/net/minecraft/world/entity/ai/goal/BreedGoal.java
++++ b/net/minecraft/world/entity/ai/goal/BreedGoal.java
+@@ -55,7 +55,9 @@ public class BreedGoal extends Goal {
+         this.animal.getNavigation().moveTo(this.partner, this.speedModifier);
+         this.loveTime++;
+         if (this.loveTime >= this.adjustedTickDelay(60) && this.animal.distanceToSqr(this.partner) < 9.0) {
++            final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+             this.breed();
++            } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+         }
+     }
+ 
+diff --git a/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java b/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java
+index 3578ece216827fd5d8c1206c689fc608e97b50df..fa2e59935e47e6547fbeb343061295b191da4bec 100644
+--- a/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java
++++ b/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java
+@@ -18,6 +18,7 @@ public class NearestLivingEntitySensor<T extends LivingEntity> extends Sensor<T>
+         double followRange = body.getAttributeValue(Attributes.FOLLOW_RANGE);
+         AABB boundingBox = body.getBoundingBox().inflate(followRange, followRange, followRange);
+         List<LivingEntity> livingEntities = level.getEntitiesOfClass(LivingEntity.class, boundingBox, mob -> mob != body && mob.isAlive());
++        if (io.papermc.paper.swift.async.SwiftAsync.parallel) io.papermc.paper.swift.async.SwiftAsync.sortByDistance(livingEntities, body); else // Swift - async entities: others move while we sort
+         livingEntities.sort(Comparator.comparingDouble(body::distanceToSqr));
+         Brain<?> brain = body.getBrain();
+         brain.setMemory(MemoryModuleType.NEAREST_LIVING_ENTITIES, livingEntities);
+diff --git a/net/minecraft/world/entity/ai/village/poi/PoiManager.java b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+index c97c39519b838b8e54b6350b20d54f730bfa752f..e53f7d0c5d071e819641cd3ac22e5c5676587432 100644
+--- a/net/minecraft/world/entity/ai/village/poi/PoiManager.java
++++ b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+@@ -361,6 +361,7 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+     public Optional<BlockPos> take(
+         final Predicate<Holder<PoiType>> predicate, final BiPredicate<Holder<PoiType>, BlockPos> filter, final BlockPos center, final int radius
+     ) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         // Paper start - optimise POI lookup
+         final PoiRecord record = ca.spottedleaf.moonrise.patches.poi_lookup.PoiAccess.findAnyPoiRecord(
+             (PoiManager)(Object)this, predicate, filter, center, radius, (double)((long)radius * (long)radius), PoiManager.Occupancy.HAS_SPACE, ca.spottedleaf.moonrise.patches.poi_lookup.PoiAccess.LOAD_FOR_SEARCHING
+@@ -373,6 +374,7 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+         record.acquireTicket();
+         return Optional.of(record.getPos());
+         // Paper end - optimise POI lookup
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public Optional<BlockPos> getRandom(
+@@ -401,9 +403,11 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+     }
+ 
+     public boolean release(final BlockPos pos) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         return this.getOrLoad(SectionPos.asLong(pos))
+             .map(section -> section.release(pos))
+             .orElseThrow(() -> Util.pauseInIde(new IllegalStateException("POI never registered at " + pos)));
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public boolean exists(final BlockPos pos, final Predicate<Holder<PoiType>> predicate) {
+@@ -442,6 +446,7 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+ 
+     /** Sum of the never-decreasing change counters of every chunk column a POI search of this range from pos can look at. */
+     public long swift$poiChangeVersion(final BlockPos pos, final int range) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         final int lowerX = net.minecraft.util.Mth.floor(pos.getX() - range) >> 4;
+         final int upperX = net.minecraft.util.Mth.floor(pos.getX() + range) >> 4;
+         final int lowerZ = net.minecraft.util.Mth.floor(pos.getZ() - range) >> 4;
+@@ -453,6 +458,7 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+             }
+         }
+         return sum;
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+     // Swift end - per-chunk POI change counters
+ 
+diff --git a/net/minecraft/world/entity/npc/villager/Villager.java b/net/minecraft/world/entity/npc/villager/Villager.java
+index e6f3961f1573dffef51b8ee724a52800c8a6004b..04fe540645a1e3b03be560aca76b49acf6e2462c 100644
+--- a/net/minecraft/world/entity/npc/villager/Villager.java
++++ b/net/minecraft/world/entity/npc/villager/Villager.java
+@@ -872,6 +872,7 @@ public class Villager extends AbstractVillager implements VillagerDataHolder, Re
+     }
+ 
+     public void gossip(final ServerLevel level, final Villager target, final long timestamp) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         if ((timestamp < this.lastGossipTime || timestamp >= this.lastGossipTime + 1200L)
+             && (timestamp < target.lastGossipTime || timestamp >= target.lastGossipTime + 1200L)) {
+             int newGossip = this.gossips.transferFrom(target.gossips, this.random, 10);
+@@ -883,6 +884,7 @@ public class Villager extends AbstractVillager implements VillagerDataHolder, Re
+                 this.updateSpecialPrices(tradingPlayer);
+             }
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     private void maybeDecayGossip() {
+@@ -896,6 +898,7 @@ public class Villager extends AbstractVillager implements VillagerDataHolder, Re
+     }
+ 
+     public void spawnGolemIfNeeded(final ServerLevel level, final long timestamp, final int villagersNeededToAgree) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         if (this.wantsToSpawnGolem(timestamp)) {
+             AABB villagerSearchBox = this.getBoundingBox().inflate(10.0, 10.0, 10.0);
+             List<Villager> nearbyVillagers = level.getEntitiesOfClass(Villager.class, villagerSearchBox);
+@@ -922,6 +925,7 @@ public class Villager extends AbstractVillager implements VillagerDataHolder, Re
+                 }
+             }
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public boolean wantsToSpawnGolem(final long timestamp) {
+@@ -930,6 +934,7 @@ public class Villager extends AbstractVillager implements VillagerDataHolder, Re
+ 
+     @Override
+     public void onReputationEventFrom(final ReputationEventType type, final Entity source) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         if (type == ReputationEventType.ZOMBIE_VILLAGER_CURED) {
+             this.gossips.add(source.getUUID(), GossipType.MAJOR_POSITIVE, 20);
+             this.gossips.add(source.getUUID(), GossipType.MINOR_POSITIVE, 25);
+@@ -945,6 +950,7 @@ public class Villager extends AbstractVillager implements VillagerDataHolder, Re
+         if (tradingPlayer != null && tradingPlayer.getUUID().equals(source.getUUID())) {
+             this.updateSpecialPrices(tradingPlayer);
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     @Override
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index ab49bb83b51a3ac210f4c51ec48c11036912149e..9a1da7958b009a936c7152a7f866682a042209b4 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1047,6 +1047,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+     @Override
+     public boolean setBlock(final BlockPos pos, final BlockState blockState, final @Block.UpdateFlags int updateFlags, final int updateLimit) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         // CraftBukkit start - tree generation
+         if (this.captureTreeGeneration) {
+             // Paper start - Protect Bedrock and End Portal/Frames from being destroyed
+@@ -1143,6 +1144,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         // CraftBukkit end
+ 
+         return true;
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     // CraftBukkit start - Split off from above in order to directly send client and physic updates
+@@ -1196,7 +1198,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     }
+ 
+     @Override
+-    public boolean destroyBlock(final BlockPos pos, boolean dropResources, final @Nullable Entity breaker, final int updateLimit) { // Paper - make dropResources non-final
++    public boolean destroyBlock(final BlockPos pos, boolean dropResources, final @Nullable Entity breaker, final int updateLimit) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes // Paper - make dropResources non-final
+         BlockState blockState = this.getBlockState(pos);
+         if (blockState.isAir()) {
+             return false;
+@@ -1237,6 +1240,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         }
+ 
+         return destroyed;
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public void addDestroyBlockEffect(final BlockPos pos, final BlockState blockState) {
+@@ -1523,12 +1527,14 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             tick.accept(entity);
+         } catch (Throwable t) {
+             // Paper start - Prevent block entity and entity crashes
++            io.papermc.paper.swift.async.SwiftAsync.ENTITY_TICK_ERRORS.incrementAndGet(); // Swift - async entities: counted for tests
+             final String msg = String.format("Entity threw exception at %s:%s,%s,%s", io.papermc.paper.util.MCUtil.getLevelName(entity.level()), entity.getX(), entity.getY(), entity.getZ());
+             MinecraftServer.LOGGER.error(msg, t);
+             getCraftServer().getPluginManager().callEvent(new com.destroystokyo.paper.event.server.ServerExceptionEvent(new com.destroystokyo.paper.exception.ServerInternalException(msg, t))); // Paper - ServerExceptionEvent
+             entity.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.DISCARD);
+             // Paper end - Prevent block entity and entity crashes
+         }
++        if (!io.papermc.paper.swift.async.SwiftAsync.parallel) // Swift - async entities: chunk tasks only between serial ticks
+         this.moonrise$midTickTasks(); // Paper - rewrite chunk system
+     }
+ 
+diff --git a/net/minecraft/world/level/block/entity/BeehiveBlockEntity.java b/net/minecraft/world/level/block/entity/BeehiveBlockEntity.java
+index c91631e7544dd913e03e5c46d85f0250389d4082..393c6c8ebe5aa4cc9cdef5db4b979989ba5b8f8e 100644
+--- a/net/minecraft/world/level/block/entity/BeehiveBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/BeehiveBlockEntity.java
+@@ -172,6 +172,7 @@ public class BeehiveBlockEntity extends BlockEntity {
+     }
+ 
+     public void addOccupant(final Bee bee) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         if (this.stored.size() < this.maxBees) { // CraftBukkit
+             // CraftBukkit start
+             if (this.level != null) {
+@@ -199,6 +200,7 @@ public class BeehiveBlockEntity extends BlockEntity {
+             bee.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.ENTER_BLOCK); // CraftBukkit - add Bukkit remove cause
+             super.setChanged();
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public void storeBee(final BeehiveBlockEntity.Occupant occupant) {
+diff --git a/net/minecraft/world/ticks/LevelTicks.java b/net/minecraft/world/ticks/LevelTicks.java
+index 7bf9e93692debcef511bfa316aeef32ae8a7d3b7..d507cfc950a18cfd00a2e0e399702eb7f8278263 100644
+--- a/net/minecraft/world/ticks/LevelTicks.java
++++ b/net/minecraft/world/ticks/LevelTicks.java
+@@ -69,6 +69,7 @@ public class LevelTicks<T> implements LevelTickAccess<T> {
+ 
+     @Override
+     public void schedule(final ScheduledTick<T> tick) {
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: serialise shared-state writes
+         long chunkKey = ChunkPos.pack(tick.pos());
+         LevelChunkTicks<T> tickContainer = this.allContainers.get(chunkKey);
+         if (tickContainer == null) {
+@@ -76,6 +77,7 @@ public class LevelTicks<T> implements LevelTickAccess<T> {
+         } else {
+             tickContainer.schedule(tick);
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities: serialise shared-state writes
+     }
+ 
+     public void tick(final long currentTick, final int maxTicksToProcess, final BiConsumer<BlockPos, T> output) {

@@ -13,7 +13,8 @@ the same answer, by one of three methods:
 Every change has a switch to turn it off (`-D` flag on the java command line), so it can be
 disabled on a live server without a rebuild.
 
-Branches: `swift` has patches 0036-0043; `swift-invasive` adds 0044 and further changes.
+Branches: `swift` has patches 0036-0043; `swift-invasive` adds 0044 and further changes. 0045 is the one
+exception to the "same gameplay" rule and is off by default (see its section).
 
 | Patch | What | Switch (set to `false` to disable) |
 |---|---|---|
@@ -26,6 +27,7 @@ Branches: `swift` has patches 0036-0043; `swift-invasive` adds 0044 and further 
 | 0042 | Far-away job-site data stays loaded for 30 s | `swift.poiRetain` |
 | 0043 | Villagers skip searches that cannot find anything | `swift.poiEmptySearchCache` |
 | 0044 | Spawning skips biome lookups that can only say "no cost" | `swift.spawnCostSkip` |
+| 0045 | Mobs tick on several threads at once (Async-style; **changes tick order**) | off unless `swift.asyncEntities=true` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -161,6 +163,73 @@ give it a cost, so the lookup is skipped and treated as "no cost", exactly what 
 spent 2.6 ms/tick in these lookups.
 
 **Code:** `io.papermc.paper.swift.spawn.SpawnCosts`, hooks in `MobSpawnSettings` and `NaturalSpawner`.
+
+## 0045: parallel entity ticking, modelled on the Async mod (`swift-invasive`, off by default)
+
+**This one is different:** it does **not** keep gameplay identical, which is why it is off unless you start the
+server with `-Dswift.asyncEntities=true`. With it off, the original loop runs unchanged.
+
+**Before:** every entity in a world ticks one after another on the main thread. A server with a few thousand
+mobs spends most of its tick there, while the other CPU cores idle.
+
+**Now (when on):** like the [Async](https://github.com/AxalotLDev/Async) mod, mobs tick on several threads at
+the same time:
+
+- Each world tick, the entity list is split. **Mobs** go to the parallel phase. **Everything else** (players,
+  projectiles, minecarts, boats, items, XP orbs, falling blocks, TNT, displays, ...) ticks on the main thread
+  in its usual order afterwards, as do mobs that ride or are ridden, are in a portal, or are bosses, shulkers,
+  raiders or copper golems. Extra types can be pinned to the main thread with
+  `-Dswift.asyncEntities.sync=minecraft:bee,...`.
+- Parallel mobs are grouped by 64x64-block area (neighbours usually land on the same thread) and the groups
+  are shared out to worker threads (`-Dswift.asyncEntities.threads`, default up to 8) and the main thread.
+- **Anything that changes shared state** takes one shared lock while the parallel phase runs, so two
+  threads never change it at once: block changes and block breaking, entities being added, removed or
+  moving to another chunk section, plugin events (plugins see one event at a time), damage and mob attacks,
+  explosions, game events (vibrations), scheduled block ticks, villager job/bed claims and gossip, iron
+  golem spawning, breeding, beehive entry, and mobs picking up items (re-checked under the lock, so two
+  mobs can never take the same item).
+- **Reading** (looking at blocks, searching for nearby entities) is not locked. Paper's entity storage is
+  built so readers can run while one writer changes it.
+- A worker that needs a chunk loaded from disk hands the load to the main thread, which serves such
+  requests while it waits for the workers (loading a chunk drives the main thread's chunk queue, which must
+  not run on two threads).
+- Fewer than `-Dswift.asyncEntities.minParallel` (default 32) mobs in a world: plain serial loop.
+
+**What changes for gameplay:** the order in which mobs act within one tick is no longer fixed. Two mobs
+racing for the same thing (a bed, an item, a target) may resolve differently from run to run, and plugins
+receive mob events from worker threads (one at a time). Breeding pairs give twins somewhat more often
+(vanilla already does this sometimes). Exact-tick contraptions that depend on which mob moves first can
+behave differently. This is the same trade-off Async makes.
+
+- Three spots in vanilla/Moonrise code were not safe with other threads reading at the same time; the tests
+  found each one, and each fix gives the same result when ticking serially:
+  - `Entity#getInBlockState` checked its cached value and then read it again (another thread could clear
+    it in between): it now reads the field once.
+  - Moonrise's per-chunk "entities by class/type" maps are filled lazily by searches, so a search could
+    write while another thread read: new keys now go into a fresh copy that replaces the map
+    (copy-on-write).
+  - The villager "nearest living entities" sensor sorted mobs by a distance that changed during the sort
+    (they move on other threads), which makes Java's sort throw: in the parallel phase it now measures each
+    distance once and sorts by those numbers.
+
+**Gain:** entity ticking spreads over the CPU cores. Benchmark (`bench_async_entities`): one entity tick pass
+over 300 villagers takes 2.9 ms serially and 0.65 ms in parallel with 8 workers plus the main thread
+(**4.5x**). How much a real server gains depends on how many mobs it has and how much of their tick is reading
+(AI, pathfinding, sensors, collisions) rather than locked writes.
+
+**Code:** `io.papermc.paper.swift.async.SwiftAsync`, hook in `ServerLevel#tick`, fixes in `Entity`,
+`ChunkEntitySlices` and `NearestLivingEntitySensor`, lock calls in `Level`,
+`ServerLevel`, `LivingEntity`, `Mob`, `Villager`, `BreedGoal`, `AnimalMakeLove`, `VillagerMakeLove`,
+`PoiManager`, `BeehiveBlockEntity`, `LevelTicks`, Moonrise's `EntityLookup`, `ServerChunkCache#syncLoad` and
+`PaperEventManager`.
+
+**Tests** (`SwiftAsyncTests`, run with `-Dswift.asyncEntities=true -Dswift.asyncEntities.minParallel=1`):
+64 mixed mobs fighting, burning and wandering for 300 ticks with no entity tick errors and a consistent
+entity storage (every entity found by id, UUID and position, exactly once, in the right chunk section); 40
+husks over 40 swords (no sword duplicated); 16 cows and 16 goats breeding (babies between half and all of
+the adults that bred); 12 villagers and 12 workstations (no workstation claimed twice); worker threads
+loading far chunks, with and without the lock held, without deadlock. Each test also requires that worker
+threads really ticked entities. With the lock switched off on purpose, the same tests crash the server.
 
 ---
 

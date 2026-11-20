@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:async_breeding_one_child_per_pair",
+  "environment": "swift:day",
+  "structure": "swift:platform",
+  "max_ticks": 1600,
+  "setup_ticks": 0,
+  "required": true
+}

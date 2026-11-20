@@ -34,6 +34,17 @@ class PaperEventManager {
 
     // SimplePluginManager
     public void callEvent(@NotNull Event event) {
+        // Swift start - async entities: plugins see one event at a time during the parallel entity phase
+        final boolean swift$held = !event.isAsynchronous() && io.papermc.paper.swift.async.SwiftAsync.lock();
+        try {
+            this.swift$callEvent(event);
+        } finally {
+            io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held);
+        }
+    }
+
+    private void swift$callEvent(@NotNull Event event) {
+        // Swift end - async entities
         if (event.isAsynchronous() && this.server.isPrimaryThread()) {
             throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
         } else if (!event.isAsynchronous() && !this.server.isPrimaryThread() && !this.server.isStopping()) {
