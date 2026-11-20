@@ -53,3 +53,4 @@ paper-server/src/minecraft/
 
 # Swift - local test server
 run-server/
+run-bench/
