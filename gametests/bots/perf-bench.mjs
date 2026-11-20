@@ -18,12 +18,17 @@ const RUN = path.resolve(HERE, '..', '..', 'run-bench')
 const PORT = 25571
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const OFF = ['-Dswift.selectorIndex=false', '-Dswift.selectorTagIndex=false', '-Dswift.nbtKeyFilter=false', '-Dswift.flatBrainLoop=false',
-  '-Dswift.poiSearchBitset=false', '-Dswift.poiRetain=false', '-Dswift.poiEmptySearchCache=false', '-Dswift.spawnCostSkip=false']
+  '-Dswift.poiSearchBitset=false', '-Dswift.poiRetain=false', '-Dswift.poiEmptySearchCache=false', '-Dswift.spawnCostSkip=false',
+  '-Dswift.allyFastPath=false']
 const MODES = {
   vanilla: [...OFF, '-Dswift.asyncEntities=false'],
   swift: ['-Dswift.asyncEntities=false'],
-  parallel: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true']
+  parallel: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true'],
+  // stock Paper (run-bench/paper-upstream.jar, built from the commit the fork branched from) vs the fork with everything on
+  paper: [],
+  fork: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true']
 }
+const JARS = { paper: 'paper-upstream.jar' }
 const WARMUP_S = Number(process.env.WARMUP_S || 45)
 const MEASURE_S = 60
 // SCENARIO=farm (default): 400 villagers + 1000 animals at noon; SCENARIO=zombies: 3000 zombies at midnight;
@@ -46,7 +51,7 @@ function prepare () {
 function startServer (mode, flags) {
   return new Promise((resolve, reject) => {
     const heap = SCENARIO === 'huge' ? '10G' : '4G'
-    const proc = spawn('java', [`-Xms${heap}`, `-Xmx${heap}`, ...flags, '-jar', 'swift-paper.jar', '--nogui'], { cwd: RUN, stdio: ['pipe', 'pipe', 'pipe'] })
+    const proc = spawn('java', [`-Xms${heap}`, `-Xmx${heap}`, ...flags, '-jar', JARS[mode] || 'swift-paper.jar', '--nogui'], { cwd: RUN, stdio: ['pipe', 'pipe', 'pipe'] })
     const log = fs.createWriteStream(path.join(RUN, `bench-${SCENARIO}-${mode}.log`))
     proc.lines = []
     let done = false

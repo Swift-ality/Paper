@@ -29,6 +29,7 @@ exception to the "same gameplay" rule and is off by default (see its section).
 | 0044 | Spawning skips biome lookups that can only say "no cost" | `swift.spawnCostSkip` |
 | 0045 | Mobs tick on several threads at once (Async-style; **changes tick order**) | off unless `swift.asyncEntities=true` |
 | 0046 | Entity tracker (who sees what, entity packets) runs on several threads | off unless `swift.asyncTracker=true` |
+| 0047 | Mob target searches skip the plugin ally-rule lookup while no plugin uses it | `swift.allyFastPath` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -263,6 +264,28 @@ comes back and is paired again; 80 cows moved every tick all deliver movement pa
 the fake players turned out to send every packet straight from the calling thread (their connection was
 never marked live the way a real one is), which loses packets when several threads send at once; they now
 behave like real players.
+
+## 0047: target searches skip the unused ally-rule lookup (`swift-invasive`)
+
+**Before:** when a mob looks for something to attack (a zombie scanning for villagers, an iron golem for
+monsters), every candidate is checked with `isAlliedTo`. That asks both mobs whether the other is an ally, and
+each answer included Paper's Allies API: fetch both mobs' plugin-side (Bukkit) objects, creating them if they
+did not exist yet, and look in a rule map that plugins can fill. Almost no server has such rules, but with
+10,000 zombies near 10,000 villagers this lookup alone took 0.78 s per tick (19% of the tick).
+
+**Now:** the first time any plugin adds an ally rule to any entity, a global flag is set (and stays set).
+Until then every rule map is provably empty, so the lookup can only answer "no" and is skipped. The team check
+in the same method also reads the team once instead of twice. Who counts as an ally is unchanged: players on
+one team, tamed animals and their owners, illagers, an evoker and its vexes, an allay and its player, and plugin
+rules once one exists.
+
+**Gain:** target search over 150 zombies x 150 villagers behind glass about 1.15x (`bench_ally_target_search`);
+bigger with more mobs in range of each other (see the 20k bench).
+
+**Tests:** `ally_differential` (144 pairs of players with and without a team, wolf, allay, evoker, vex,
+illagers, zombie, villager, iron golem: identical with the shortcut on and off, and the known allies come out
+as allies), `ally_plugin_rule_respected` (a rule added through the API makes a zombie leave villagers alone; it
+catches a missing flag), `ally_zombie_targets_villager` (vanilla targeting still works).
 
 ---
 

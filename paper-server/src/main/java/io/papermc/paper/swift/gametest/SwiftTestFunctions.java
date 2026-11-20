@@ -68,6 +68,10 @@ public final class SwiftTestFunctions implements TestFunctionLoader {
         register.accept(key("tracker_pairs_and_unpairs"), SwiftTrackerTests::pairsAndUnpairs);
         register.accept(key("tracker_moving_entities_reach_player"), SwiftTrackerTests::movingEntitiesReachPlayer);
         register.accept(key("bench_async_tracker"), SwiftTrackerTests::bench);
+        register.accept(key("ally_differential"), SwiftAllyTests::differential);
+        register.accept(key("ally_plugin_rule_respected"), SwiftAllyTests::pluginRuleRespected);
+        register.accept(key("ally_zombie_targets_villager"), SwiftAllyTests::zombieTargetsVillager);
+        register.accept(key("bench_ally_target_search"), SwiftAllyTests::bench);
     }
 
     // Hopper above a chest pulls a dropped item and pushes it down. Guards hopper / item-entity optimisations.

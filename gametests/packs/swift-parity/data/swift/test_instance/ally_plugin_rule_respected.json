@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:ally_plugin_rule_respected",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 200,
+  "setup_ticks": 0,
+  "required": true
+}

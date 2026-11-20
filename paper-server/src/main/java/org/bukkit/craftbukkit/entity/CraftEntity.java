@@ -1437,6 +1437,7 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
     public void addAdditionalAlliedRule(final @NotNull Key key, final @NotNull Predicate<org.bukkit.entity.Entity> predicate) {
         Preconditions.checkArgument(key != null, "key cannot be null");
         Preconditions.checkArgument(predicate != null, "predicate cannot be null");
+        io.papermc.paper.swift.entity.SwiftAllies.anyRules = true; // Swift - ally fast path: from now on, ask the rule maps
         this.additionalAlliedRules.put(key, predicate);
     }
 

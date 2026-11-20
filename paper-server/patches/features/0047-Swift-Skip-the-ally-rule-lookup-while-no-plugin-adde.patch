@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 23:52:06 +0100
+Subject: [PATCH] Swift: Skip the ally-rule lookup while no plugin added a rule
+
+
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 77b55205550c003baa7cd1adbd572186d47dc84e..efb135ccfe79e3b9ca54240ddb4da5cc4fa1a457 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -3847,11 +3847,12 @@ public abstract class Entity
+     }
+ 
+     protected boolean considersEntityAsAlly(final Entity other) {
+-        return this.isAlliedTo(other.getTeam()) || this.getBukkitEntity().considersEntityAsAlly0(other.getBukkitEntity()); // Paper - Allies API
++        return this.isAlliedTo(other.getTeam()) || io.papermc.paper.swift.entity.SwiftAllies.pluginConsidersAlly(this, other); // Paper - Allies API // Swift - ally fast path: skip the rule lookup while no rule exists
+     }
+ 
+     public boolean isAlliedTo(final @Nullable Team other) {
+-        return this.getTeam() != null && this.getTeam().isAlliedTo(other);
++        final PlayerTeam team = this.getTeam(); // Swift - ally fast path: look the team up once
++        return team != null && team.isAlliedTo(other); // Swift - ally fast path
+     }
+ 
+     public void setInvisible(final boolean invisible) {

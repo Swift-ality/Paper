@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:bench_ally_target_search",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 300,
+  "setup_ticks": 0,
+  "required": false
+}

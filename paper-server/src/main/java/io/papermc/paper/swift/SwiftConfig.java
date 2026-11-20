@@ -37,6 +37,8 @@ public final class SwiftConfig {
             List.of("Villagers skip bed/job searches that cannot find anything (patch 0043).")),
         new Option("optimizations.spawn-cost-skip", "swift.spawnCostSkip", true,
             List.of("Natural spawning skips biome lookups that can only say \"no cost\" (patch 0044).")),
+        new Option("optimizations.ally-fast-path", "swift.allyFastPath", true,
+            List.of("Mob target searches skip the plugin ally-rule lookup while no plugin has added an ally rule (patch 0047).")),
         // parallel entity ticking
         new Option("parallel-entity-ticking.enabled", "swift.asyncEntities", false,
             List.of("Tick mobs on several threads at once, like the Async mod (patch 0045).",

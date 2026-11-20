@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:ally_zombie_targets_villager",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 400,
+  "setup_ticks": 0,
+  "required": true
+}
