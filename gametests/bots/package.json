@@ -1,0 +1,17 @@
+{
+  "name": "swift-selector-bots",
+  "version": "1.0.0",
+  "description": "Network bot tests for Swift Paper entity selectors",
+  "scripts": {
+    "compare": "node compare.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "minecraft-protocol": "^1.68.0",
+    "prismarine-nbt": "^2.8.0"
+  },
+  "private": true
+}

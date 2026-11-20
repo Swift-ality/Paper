@@ -22,6 +22,38 @@ Paper services), which is why this runs inside a normal server.
 The runner is `paper-server/src/main/java/io/papermc/paper/swift/gametest/SwiftGameTests.java`.
 It does nothing unless `-Dswift.gametest` is set.
 
+## Network bot tests (`gametests/bots`)
+
+Selectors checked end to end over the real network, the way players and command blocks use them:
+
+```
+./gradlew createPaperclipJar
+cp paper-server/build/libs/paper-paperclip-*.jar run-bots/swift-paper.jar   # run-bots/ is git-ignored
+cd gametests/bots && npm install && node compare.mjs
+```
+
+`run-bots/` needs `plugins/ViaVersion.jar` and `plugins/ViaBackwards.jar` (5.12.3+, Modrinth): the bots
+are raw `minecraft-protocol` clients connecting as 1.21.11 (the bot library has no 26.3 support yet).
+Via only translates packets; commands and selectors run server-side unchanged.
+
+`selector-bots.mjs <mode> [-D flags]` starts a fresh server (flat world in the `the_void` biome, so no
+mob spawns while chunks generate and every run creates identical entities with identical ids), joins
+`Tester` (op) and `Other`, and plays a scripted scenario: 64 uniquely named entities (pig, cow, zombie,
+armor stand, villager, marker, sheep, item), tags/scores/teams/inventories, then four rounds of
+mutations (tag add/remove with `limit=`, `data merge`, kills, scoreboard resets, new summons), each
+followed by 53 counting selectors (`execute if entity`) and 17 order selectors
+(`execute as <sel> run tellraw` prints each entity's name in execution order). Every reply is flattened
+to text/translation keys (hover/click data with UUIDs dropped) into `run-bots/transcript-<mode>.txt`.
+
+`compare.mjs` runs it with every Swift switch on and with all off and requires identical transcripts.
+2026-11-20: identical (1798 lines: 266 counts, 1291 order lines). A planted order bug in the type index
+(buckets sorted by entity id) changed 97 lines, so the comparison does catch selector differences.
+
+Bot gotchas: mineflayer's movement/teleport replies got the bots kicked ("Invalid move player
+packet") through the version translation, hence raw clients that only confirm teleports, acknowledge
+chunk batches and send chat commands. Animals spawned during chunk generation made two runs create
+different entities, so different entity ids and a different `limit=` pick; the void biome fixes that.
+
 ## Shadow verify
 
 `-Dswift.verify=true` makes optimisations that support it (so far the flattened brain loop) run the
