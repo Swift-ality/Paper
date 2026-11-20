@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:brain_all_types",
+  "environment": "swift:day",
+  "structure": "swift:platform",
+  "max_ticks": 400,
+  "setup_ticks": 0,
+  "required": true
+}

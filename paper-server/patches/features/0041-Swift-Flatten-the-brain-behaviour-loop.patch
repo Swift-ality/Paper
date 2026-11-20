@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 12:27:26 +0100
+Subject: [PATCH] Swift: Flatten the brain behaviour loop
+
+Brain#startEachNonRunningBehavior and #getRunningBehaviors walked a
+TreeMap -> HashMap -> LinkedHashSet nest for every mob every tick. Keep a
+snapshot of that nest in its own iteration order (rebuilt whenever a
+behaviour is added or all are removed) as (activity, behaviours[]) groups,
+and check each group's activity live when the group is reached, exactly as
+the nested walk does (a starting behaviour can change the active
+activities for later groups). Duplicates across activities are kept.
+
+-Dswift.verify=true runs vanilla's walk authoritatively with the snapshot
+in lockstep (same group, same activity decision, same behaviours) and
+reports any difference. Disable with -Dswift.flatBrainLoop=false.
+
+Benchmark: villager brain tick 4.1 -> 2.6 us (1.5-1.6x).
+
+diff --git a/net/minecraft/world/entity/ai/Brain.java b/net/minecraft/world/entity/ai/Brain.java
+index 2b22bbfac4e324969e7cff368c690ee915d33a66..ca9d18c15ea530eb1b6350cd27bc63314bfb3b7b 100644
+--- a/net/minecraft/world/entity/ai/Brain.java
++++ b/net/minecraft/world/entity/ai/Brain.java
+@@ -267,6 +267,16 @@ public class Brain<E extends LivingEntity> {
+     @VisibleForDebug
+     public List<BehaviorControl<? super E>> getRunningBehaviors() {
+         List<BehaviorControl<? super E>> runningBehaviours = new ObjectArrayList<>();
++        // Swift start - flat behaviour loop: same behaviours, same order (duplicates included)
++        if (SWIFT_FLAT_LOOP && !io.papermc.paper.swift.SwiftVerify.ENABLED) {
++            for (final BehaviorControl<? super E> behavior : this.swift$flat().all) {
++                if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                    runningBehaviours.add(behavior);
++                }
++            }
++            return runningBehaviours;
++        }
++        // Swift end - flat behaviour loop
+ 
+         for (Map<Activity, Set<BehaviorControl<? super E>>> behavioursByActivities : this.availableBehaviorsByPriority.values()) {
+             for (Set<BehaviorControl<? super E>> behaviors : behavioursByActivities.values()) {
+@@ -278,6 +288,20 @@ public class Brain<E extends LivingEntity> {
+             }
+         }
+ 
++        // Swift start - flat behaviour loop: shadow verification of the flat path
++        if (SWIFT_FLAT_LOOP && io.papermc.paper.swift.SwiftVerify.ENABLED) {
++            io.papermc.paper.swift.SwiftVerify.checked();
++            final List<BehaviorControl<? super E>> flatRunning = new ObjectArrayList<>();
++            for (final BehaviorControl<? super E> behavior : this.swift$flat().all) {
++                if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                    flatRunning.add(behavior);
++                }
++            }
++            if (!flatRunning.equals(runningBehaviours)) {
++                io.papermc.paper.swift.SwiftVerify.mismatch("Brain#getRunningBehaviors", flatRunning + " vs " + runningBehaviours);
++            }
++        }
++        // Swift end - flat behaviour loop
+         return runningBehaviours;
+     }
+ 
+@@ -370,12 +394,14 @@ public class Brain<E extends LivingEntity> {
+                 .computeIfAbsent(pair.getFirst(), key -> Maps.newHashMap())
+                 .computeIfAbsent(activity, key -> Sets.newLinkedHashSet())
+                 .add(behavior);
++            this.swift$behaviorsVersion++; // Swift - flat behaviour loop
+         }
+     }
+ 
+     @VisibleForTesting
+     public void removeAllBehaviors() {
+         this.availableBehaviorsByPriority.clear();
++        this.swift$behaviorsVersion++; // Swift - flat behaviour loop
+     }
+ 
+     public boolean isActive(final Activity activity) {
+@@ -407,8 +433,124 @@ public class Brain<E extends LivingEntity> {
+         }
+     }
+ 
++    // Swift start - flat behaviour loop
++    public static boolean SWIFT_FLAT_LOOP = Boolean.parseBoolean(System.getProperty("swift.flatBrainLoop", "true")); // not final: tests compare both paths
++    private int swift$behaviorsVersion;
++    private @Nullable SwiftFlat<E> swift$flat;
++
++    /** Snapshot of availableBehaviorsByPriority in its own iteration order; rebuilt whenever it changes. */
++    private static final class SwiftFlat<E extends LivingEntity> {
++        final int version;
++        final Activity[] groupActivity;
++        final BehaviorControl<? super E>[][] groupBehaviors;
++        final BehaviorControl<? super E>[] all;
++
++        @SuppressWarnings("unchecked")
++        SwiftFlat(final int version, final Map<Integer, Map<Activity, Set<BehaviorControl<? super E>>>> byPriority) {
++            this.version = version;
++            final List<Activity> activities = new java.util.ArrayList<>();
++            final List<BehaviorControl<? super E>[]> groups = new java.util.ArrayList<>();
++            final List<BehaviorControl<? super E>> all = new java.util.ArrayList<>();
++            for (final Map<Activity, Set<BehaviorControl<? super E>>> byActivity : byPriority.values()) {
++                for (final Map.Entry<Activity, Set<BehaviorControl<? super E>>> entry : byActivity.entrySet()) {
++                    activities.add(entry.getKey());
++                    final BehaviorControl<? super E>[] group = entry.getValue().toArray(new BehaviorControl[0]);
++                    groups.add(group);
++                    java.util.Collections.addAll(all, group);
++                }
++            }
++            this.groupActivity = activities.toArray(new Activity[0]);
++            this.groupBehaviors = groups.toArray(new BehaviorControl[0][]);
++            this.all = all.toArray(new BehaviorControl[0]);
++        }
++    }
++
++    private SwiftFlat<E> swift$flat() {
++        SwiftFlat<E> flat = this.swift$flat;
++        if (flat == null || flat.version != this.swift$behaviorsVersion) {
++            flat = new SwiftFlat<>(this.swift$behaviorsVersion, this.availableBehaviorsByPriority);
++            this.swift$flat = flat;
++        }
++        return flat;
++    }
++
++    /** The fast loop's activity gate (one place, so shadow verification checks the real thing). */
++    private boolean swift$groupActive(final Activity activity) {
++        return this.activeActivities.contains(activity);
++    }
++
++    /**
++     * Shadow verification: vanilla's nested walk does the real work; the flat snapshot is walked in
++     * lockstep and must offer the same group, the same gate decision at that moment, and the same
++     * behaviours in the same order.
++     */
++    private void swift$startWithShadow(final ServerLevel level, final E body, final long time) {
++        io.papermc.paper.swift.SwiftVerify.checked();
++        final SwiftFlat<E> flat = this.swift$flat();
++        boolean ok = true;
++        int g = 0;
++        for (final Map<Activity, Set<BehaviorControl<? super E>>> byActivity : this.availableBehaviorsByPriority.values()) {
++            for (final Map.Entry<Activity, Set<BehaviorControl<? super E>>> entry : byActivity.entrySet()) {
++                final Activity activity = entry.getKey();
++                final boolean vanillaActive = this.activeActivities.contains(activity);
++                if (ok) {
++                    if (g >= flat.groupActivity.length || flat.groupActivity[g] != activity) {
++                        io.papermc.paper.swift.SwiftVerify.mismatch("Brain flat loop", "group " + g + " is " + activity + " in vanilla");
++                        ok = false;
++                    } else if (this.swift$groupActive(flat.groupActivity[g]) != vanillaActive) {
++                        io.papermc.paper.swift.SwiftVerify.mismatch("Brain flat loop", "gate for " + activity + " differs (vanilla " + vanillaActive + ")");
++                        ok = false;
++                    }
++                }
++                int i = 0;
++                for (final BehaviorControl<? super E> behavior : entry.getValue()) {
++                    if (ok && (i >= flat.groupBehaviors[g].length || flat.groupBehaviors[g][i] != behavior)) {
++                        io.papermc.paper.swift.SwiftVerify.mismatch("Brain flat loop", "group " + g + " index " + i + " " + behavior);
++                        ok = false;
++                    }
++                    i++;
++                    if (vanillaActive && behavior.getStatus() == Behavior.Status.STOPPED) {
++                        behavior.tryStart(level, body, time);
++                    }
++                }
++                if (ok && i != flat.groupBehaviors[g].length) {
++                    io.papermc.paper.swift.SwiftVerify.mismatch("Brain flat loop", "group " + g + " length " + i + " vs " + flat.groupBehaviors[g].length);
++                    ok = false;
++                }
++                g++;
++            }
++        }
++        if (ok && g != flat.groupActivity.length) {
++            io.papermc.paper.swift.SwiftVerify.mismatch("Brain flat loop", "group count " + g + " vs " + flat.groupActivity.length);
++        }
++    }
++    // Swift end - flat behaviour loop
++
+     private void startEachNonRunningBehavior(final ServerLevel level, final E body) {
+         long time = level.getGameTime();
++        // Swift start - flat behaviour loop: the same (activity, behaviours) groups in the same order, with the
++        // activity checked live when each group is reached, exactly like the nested walk below (a behaviour
++        // that starts can change the active activities for the groups after it)
++        if (SWIFT_FLAT_LOOP && io.papermc.paper.swift.SwiftVerify.ENABLED) {
++            this.swift$startWithShadow(level, body, time);
++            return;
++        }
++        if (SWIFT_FLAT_LOOP) {
++            final SwiftFlat<E> flat = this.swift$flat();
++            final Activity[] activities = flat.groupActivity;
++            final BehaviorControl<? super E>[][] groups = flat.groupBehaviors;
++            for (int g = 0; g < activities.length; g++) {
++                if (this.swift$groupActive(activities[g])) {
++                    for (final BehaviorControl<? super E> behavior : groups[g]) {
++                        if (behavior.getStatus() == Behavior.Status.STOPPED) {
++                            behavior.tryStart(level, body, time);
++                        }
++                    }
++                }
++            }
++            return;
++        }
++        // Swift end - flat behaviour loop
+ 
+         for (Map<Activity, Set<BehaviorControl<? super E>>> behavioursByActivities : this.availableBehaviorsByPriority.values()) {
+             for (Entry<Activity, Set<BehaviorControl<? super E>>> behavioursForActivity : behavioursByActivities.entrySet()) {

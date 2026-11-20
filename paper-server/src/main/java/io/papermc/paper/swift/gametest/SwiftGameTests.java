@@ -116,7 +116,16 @@ public final class SwiftGameTests {
                 GlobalTestReporter.finish();
                 LOGGER.info("[SwiftGameTests] ===== {} tests done in {} - {} required failed, {} optional failed =====",
                     tracker.getTotalCount(), stopwatch.stop(), tracker.getFailedRequiredCount(), tracker.getFailedOptionalCount());
-                finish(server, tracker.getFailedRequiredCount());
+                int failed = tracker.getFailedRequiredCount();
+                if (io.papermc.paper.swift.SwiftVerify.ENABLED) {
+                    LOGGER.info("[SwiftGameTests] shadow verify: {} checks, {} mismatches", io.papermc.paper.swift.SwiftVerify.checks(),
+                        io.papermc.paper.swift.SwiftVerify.mismatches());
+                    if (io.papermc.paper.swift.SwiftVerify.mismatches() > 0) {
+                        LOGGER.error("[SwiftGameTests] FAIL shadow verify reported mismatches (see [SwiftVerify] lines)");
+                        failed++;
+                    }
+                }
+                finish(server, failed);
             }
         });
         LOGGER.info("[SwiftGameTests] running {} of {} registered tests matching '{}' at {} in {}", infos.size(), total, selection,

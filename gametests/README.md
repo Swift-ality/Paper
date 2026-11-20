@@ -8,6 +8,7 @@ vanilla behaviour down so an optimisation that changes it fails the build.
 ./gradlew :paper-server:runGameTests -PgameTests=swift:hopper*
 ./gradlew :paper-server:runGameTests -PgameTestKeepWorld=true
 ./gradlew :paper-server:runGameTests -PgameTestJvmArgs="-Dswift.nbtKeyFilter=false"   # suite with a change switched off
+./gradlew :paper-server:runGameTests -PgameTestJvmArgs=-Dswift.verify=true          # shadow verify (see below)
 ```
 
 The task boots a real Paper server (full CraftBukkit) from the dev classpath in
@@ -20,6 +21,14 @@ Vanilla's headless `net.minecraft.gametest.Main` can't start under Paper (null
 Paper services), which is why this runs inside a normal server.
 The runner is `paper-server/src/main/java/io/papermc/paper/swift/gametest/SwiftGameTests.java`.
 It does nothing unless `-Dswift.gametest` is set.
+
+## Shadow verify
+
+`-Dswift.verify=true` makes optimisations that support it (so far the flattened brain loop) run the
+original code authoritatively and walk the fast path in lockstep, reporting any difference through
+`io.papermc.paper.swift.SwiftVerify`. The runner prints `shadow verify: N checks, M mismatches` and
+fails the run if M > 0. Some bugs are invisible to behaviour tests (a planted "activity gate always
+true" passed every behaviour test) but not to verify, so a release needs a verify run too.
 
 ## Fake players
 

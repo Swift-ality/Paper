@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:bench_brain_loop",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 600,
+  "setup_ticks": 0,
+  "required": false
+}

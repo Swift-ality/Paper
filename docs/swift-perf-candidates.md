@@ -60,6 +60,11 @@ villager search): 1.2-2.4x depending on allocation/GC pressure (median of altern
 5-6 us vs 6-14 us). Smaller than the profile's 40 % share suggested on an idle test server; the
 section walk itself remains, which item B targets.
 
+**D shipped** (patch 0041, kill switch `-Dswift.flatBrainLoop=false`). Whole villager brain tick
+4.0-4.1 us -> 2.4-2.7 us (1.5-1.7x). Verified by `SwiftVerify` lockstep shadow over 87 mob types
+(63k checks, 0 mismatches); planted bugs (reversed groups, gate always true) are caught by verify,
+not by the behaviour tests, so verify runs are part of the release checklist from now on.
+
 Tests to write first (green on current code), using fake players where a player is involved:
 - villager claims a bed within range; villager without a bed never claims one; **bed placed later is
   claimed** (the invalidation case for B); bed removed while claimed.
