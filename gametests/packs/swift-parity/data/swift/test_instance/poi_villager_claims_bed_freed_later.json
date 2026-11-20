@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:poi_villager_claims_bed_freed_later",
+  "environment": "swift:day",
+  "structure": "swift:platform",
+  "max_ticks": 1500,
+  "setup_ticks": 0,
+  "required": true
+}

@@ -135,6 +135,32 @@ final class SwiftPoiTests {
         });
     }
 
+    /**
+     * One bed, two villagers: A claims it; B searches in vain for a while (its searches see no free bed);
+     * then A dies, which frees the bed, and B must claim it. Guards anything that remembers "no free
+     * POI here" (the freed ticket must invalidate it).
+     */
+    static void claimsBedFreedLater(final GameTestHelper helper) {
+        watcher(helper);
+        final BlockPos head = bed(helper, new BlockPos(5, 1, 6));
+        final Villager a = villager(helper, new BlockPos(2, 1, 2));
+        helper.runAfterDelay(300, () -> {
+            if (!hasHomeAt(helper, a, head)) {
+                helper.fail(Component.literal("villager A did not claim the bed within 300 ticks"));
+                return;
+            }
+            final Villager b = villager(helper, new BlockPos(6, 1, 2));
+            helper.runAfterDelay(200, () -> {
+                if (b.getBrain().getMemory(MemoryModuleType.HOME).isPresent()) {
+                    helper.fail(Component.literal("villager B has a home while the only bed is taken"));
+                    return;
+                }
+                a.kill(helper.getLevel());
+                succeedWhen(helper, () -> helper.assertTrue(hasHomeAt(helper, b, head), Component.literal("villager B did not claim the freed bed")));
+            });
+        });
+    }
+
     /** Two unemployed villagers, one lectern: exactly one becomes a librarian, the other stays unemployed. */
     static void oneWorkstationTwoVillagers(final GameTestHelper helper) {
         watcher(helper);
