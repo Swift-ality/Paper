@@ -85,5 +85,10 @@ Gotchas found while building this:
   runs `nbt=` on entities without `x`, `@e[nbt={},tag=x]` does (and `nbt=` has side effects).
 - For a cache that only engages on a repeated query, run the query at least twice before the
   assertion, or a planted bug will slip past (it did once).
+- Paper keeps time per world: the `clock_time` test environment only works because patch 0039 makes
+  it set the level's clock (before that, `swift:default`/`swift:day` silently did nothing).
+- Villagers (any mob) far from players are kept inactive by Paper's entity activation range and
+  don't walk: put a fake player near any test that needs mobs to move (see `SwiftPoiTests`).
+- Villagers only walk to a workstation in their day schedule; use `swift:day` for job tests.
 - `-PgameTests` takes one selector; comma lists silently match fewer tests. Run mutation checks
   against the whole suite.

@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 12:13:30 +0100
+Subject: [PATCH] Swift: Reusable section bit array for POI searches
+
+PoiAccess#findNearestPoiRecords (villager bed/job/meeting searches) and
+#findClosestPoiDataRecords (portal search) allocated a LongOpenHashSet per
+search and grew it to ~1000 section keys. Every key the walk adds lies in
+the search box widened by one section, so a reused bit array over that box
+gives the same add() answers, the same queue order and the same results
+(keys outside the box would still go to a hash set).
+See io.papermc.paper.swift.poi.SectionVisitSet.
+
+Profile GhlizX39EE: LongOpenHashSet#add/rehash were 0.22-0.37 ms/tick of
+0.58-0.76 ms/tick of POI searching. Empty 48-block search: ~1.4-2.4x.
+Disable with -Dswift.poiSearchBitset=false.
+
+diff --git a/ca/spottedleaf/moonrise/patches/poi_lookup/PoiAccess.java b/ca/spottedleaf/moonrise/patches/poi_lookup/PoiAccess.java
+index 85d80b3952a76b0ca7f67401a659cf35dd55b082..2051c06c6464a9f09b2221a0a8f7e966ba8d4586 100644
+--- a/ca/spottedleaf/moonrise/patches/poi_lookup/PoiAccess.java
++++ b/ca/spottedleaf/moonrise/patches/poi_lookup/PoiAccess.java
+@@ -117,9 +117,14 @@ public final class PoiAccess {
+         final long centerKey = CoordinateUtils.getChunkSectionKey(centerX, centerY, centerZ);
+ 
+         final LongArrayFIFOQueue queue = new LongArrayFIFOQueue();
+-        final LongOpenHashSet seen = new LongOpenHashSet();
+-        seen.add(centerKey);
++        // Swift start - reusable section bit array instead of a per-search hash set
++        final io.papermc.paper.swift.poi.SectionVisitSet swiftSeen = io.papermc.paper.swift.poi.SectionVisitSet.enabled
++            ? io.papermc.paper.swift.poi.SectionVisitSet.acquire(lowerX - 1, upperX + 1, lowerY - 1, upperY + 1, lowerZ - 1, upperZ + 1) : null;
++        final LongOpenHashSet seen = swiftSeen == null ? new LongOpenHashSet() : null;
++        if (swiftSeen != null) swiftSeen.add(centerX, centerY, centerZ, centerKey); else seen.add(centerKey);
+         queue.enqueue(centerKey);
++        try {
++        // Swift end - reusable section bit array instead of a per-search hash set
+ 
+         while (!queue.isEmpty()) {
+             final long key = queue.dequeueLong();
+@@ -160,7 +165,7 @@ public final class PoiAccess {
+                         final int neighbourZ = sectionZ + dz;
+ 
+                         final long neighbourKey = CoordinateUtils.getChunkSectionKey(neighbourX, neighbourY, neighbourZ);
+-                        if (seen.add(neighbourKey)) {
++                        if (swiftSeen != null ? swiftSeen.add(neighbourX, neighbourY, neighbourZ, neighbourKey) : seen.add(neighbourKey)) { // Swift - reusable section bit array
+                             queue.enqueue(neighbourKey);
+                         }
+                     }
+@@ -223,6 +228,11 @@ public final class PoiAccess {
+                 }
+             }
+         }
++        // Swift start - reusable section bit array
++        } finally {
++            if (swiftSeen != null) swiftSeen.release();
++        }
++        // Swift end - reusable section bit array
+ 
+         // uh oh! we might have multiple records that match the distance sorting!
+         // we need to re-order our results by the way vanilla would have iterated over them.
+@@ -360,9 +370,14 @@ public final class PoiAccess {
+         final long centerKey = CoordinateUtils.getChunkSectionKey(centerX, centerY, centerZ);
+ 
+         final LongArrayFIFOQueue queue = new LongArrayFIFOQueue();
+-        final LongOpenHashSet seen = new LongOpenHashSet();
+-        seen.add(centerKey);
++        // Swift start - reusable section bit array instead of a per-search hash set
++        final io.papermc.paper.swift.poi.SectionVisitSet swiftSeen = io.papermc.paper.swift.poi.SectionVisitSet.enabled
++            ? io.papermc.paper.swift.poi.SectionVisitSet.acquire(lowerX - 1, upperX + 1, lowerY - 1, upperY + 1, lowerZ - 1, upperZ + 1) : null;
++        final LongOpenHashSet seen = swiftSeen == null ? new LongOpenHashSet() : null;
++        if (swiftSeen != null) swiftSeen.add(centerX, centerY, centerZ, centerKey); else seen.add(centerKey);
+         queue.enqueue(centerKey);
++        try {
++        // Swift end - reusable section bit array instead of a per-search hash set
+ 
+         while (!queue.isEmpty()) {
+             final long key = queue.dequeueLong();
+@@ -404,7 +419,7 @@ public final class PoiAccess {
+                         final int neighbourZ = sectionZ + dz;
+ 
+                         final long neighbourKey = CoordinateUtils.getChunkSectionKey(neighbourX, neighbourY, neighbourZ);
+-                        if (seen.add(neighbourKey)) {
++                        if (swiftSeen != null ? swiftSeen.add(neighbourX, neighbourY, neighbourZ, neighbourKey) : seen.add(neighbourKey)) { // Swift - reusable section bit array
+                             queue.enqueue(neighbourKey);
+                         }
+                     }
+@@ -498,6 +513,11 @@ public final class PoiAccess {
+                 }
+             }
+         }
++        // Swift start - reusable section bit array
++        } finally {
++            if (swiftSeen != null) swiftSeen.release();
++        }
++        // Swift end - reusable section bit array
+ 
+         final List<PoiRecord> closestRecordsUnsorted = new ArrayList<>();
+ 

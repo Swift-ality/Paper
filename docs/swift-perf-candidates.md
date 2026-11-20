@@ -54,6 +54,12 @@ Refined, all exact:
 
 Order: A (mechanical, quick win) -> D -> C -> B (most gain on villager-heavy servers, most care) -> E/F.
 
+Status: **A shipped** (patch 0040, `SectionVisitSet`, kill switch `-Dswift.poiSearchBitset=false`).
+Differential: 400 random POIs, 600 search comparisons, identical. Benchmark (empty 48-block
+villager search): 1.2-2.4x depending on allocation/GC pressure (median of alternating rounds;
+5-6 us vs 6-14 us). Smaller than the profile's 40 % share suggested on an idle test server; the
+section walk itself remains, which item B targets.
+
 Tests to write first (green on current code), using fake players where a player is involved:
 - villager claims a bed within range; villager without a bed never claims one; **bed placed later is
   claimed** (the invalidation case for B); bed removed while claimed.
