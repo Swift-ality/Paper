@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 04:09:35 +0100
+Subject: [PATCH] Swift: Brain sensors sort by distance on primitive arrays
+
+
+diff --git a/net/minecraft/world/entity/ai/sensing/NearestItemSensor.java b/net/minecraft/world/entity/ai/sensing/NearestItemSensor.java
+index 8aeea55380462421cde43afb4b2fb0ce44b65195..876f8df429f9c6d40663c529751dcc6885eef5af 100644
+--- a/net/minecraft/world/entity/ai/sensing/NearestItemSensor.java
++++ b/net/minecraft/world/entity/ai/sensing/NearestItemSensor.java
+@@ -25,6 +25,7 @@ public class NearestItemSensor extends Sensor<Mob> {
+     protected void doTick(final ServerLevel level, final Mob body) {
+         Brain<?> brain = body.getBrain();
+         List<ItemEntity> items = level.getEntitiesOfClass(ItemEntity.class, body.getBoundingBox().inflate(32.0, 16.0, 32.0), item -> item.closerThan(body, MAX_DISTANCE_TO_WANTED_ITEM) && body.wantsToPickUp(level, item.getItem())); // Paper - Perf: Move predicate into getEntities
++        if (io.papermc.paper.swift.entity.SwiftSort.enabled) io.papermc.paper.swift.entity.SwiftSort.byDistance(items, body); else // Swift - sensor sort: same order, each distance computed once
+         items.sort(Comparator.comparingDouble(body::distanceToSqr));
+         // Paper start - Perf: remove streams from hot code
+         ItemEntity nearest = null;
+diff --git a/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java b/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java
+index fa2e59935e47e6547fbeb343061295b191da4bec..cf3659314e5a96dba0a3d42c8bebcb6dda002c34 100644
+--- a/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java
++++ b/net/minecraft/world/entity/ai/sensing/NearestLivingEntitySensor.java
+@@ -18,7 +18,7 @@ public class NearestLivingEntitySensor<T extends LivingEntity> extends Sensor<T>
+         double followRange = body.getAttributeValue(Attributes.FOLLOW_RANGE);
+         AABB boundingBox = body.getBoundingBox().inflate(followRange, followRange, followRange);
+         List<LivingEntity> livingEntities = level.getEntitiesOfClass(LivingEntity.class, boundingBox, mob -> mob != body && mob.isAlive());
+-        if (io.papermc.paper.swift.async.SwiftAsync.parallel) io.papermc.paper.swift.async.SwiftAsync.sortByDistance(livingEntities, body); else // Swift - async entities: others move while we sort
++        if (io.papermc.paper.swift.entity.SwiftSort.enabled || io.papermc.paper.swift.async.SwiftAsync.parallel) io.papermc.paper.swift.entity.SwiftSort.byDistance(livingEntities, body); else // Swift - sensor sort: same order, each distance computed once (also safe while others move during parallel ticking)
+         livingEntities.sort(Comparator.comparingDouble(body::distanceToSqr));
+         Brain<?> brain = body.getBrain();
+         brain.setMemory(MemoryModuleType.NEAREST_LIVING_ENTITIES, livingEntities);

@@ -32,6 +32,7 @@ exception to the "same gameplay" rule and is off by default (see its section).
 | 0047 | Mob target searches skip the plugin ally-rule lookup while no plugin uses it | `swift.allyFastPath` |
 | 0048 | Parallel ticking: entity pushes, cramming and entity searches behave like serial ticking | part of `swift.asyncEntities` |
 | 0049 | Nearest-target searches trace line of sight nearest-first | `swift.nearestFirstLineOfSight` |
+| 0050 | Brain sensors sort nearby entities on plain numbers (same order) | `swift.sensorSort` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -350,6 +351,29 @@ exactly equal distances), golems and fake players among random glass pillars; li
 searches with combat, non-combat, short-range and selector conditions: 7,680 searches, identical with the fast
 path on and off), `los_zombie_targets_visible_villager` (a zombie ignores a nearer villager behind glass and
 targets the visible one).
+
+---
+
+## 0050: brain sensors sort nearby entities on plain numbers (`swift-invasive`)
+
+**Before:** every 20 ticks, each villager, piglin, axolotl, frog, etc. lists all living entities within its
+follow range and sorts them by distance (`NearestLivingEntitySensor`); mobs that pick up items do the same
+for items (`NearestItemSensor`). The sort used `Comparator.comparingDouble(body::distanceToSqr)`, so Java's
+TimSort recomputed two distances on every comparison, through a lambda. In the 20k profile this was about 9%
+of all entity work (0.36 s of worker time per tick).
+
+**Now:** each distance is computed once, and the list is sorted by the pair (distance, position in the
+list) on two primitive `long` arrays. A squared distance is never negative or NaN, and for those values the
+raw bits of a double sort exactly like `Double.compare`. Breaking ties by list position is what the stable
+TimSort does, so the order is identical, ties included. Computing each distance once also keeps the sort
+valid while other threads move entities, so the separate parallel-ticking sort from 0045 is gone.
+
+**Gain:** 300 villagers each sorting their ~300 neighbours: 1.87x (`bench_sensor_sort`).
+
+**Tests:** `sort_differential` (60 random layouts of villagers, piglins and items on a quarter-block grid,
+so many share a spot or a distance: 5,760 sorts with 10,381 equal-distance neighbours, same order as the
+comparator sort), `sort_sensor_memory_nearest_first` (a real villager's sensor memory is nearest first).
+`-Dswift.verify=true` also sorts the vanilla way on every sensor tick and reports any difference.
 
 ---
 

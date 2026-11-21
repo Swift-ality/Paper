@@ -306,30 +306,6 @@ public final class SwiftAsync {
         return count;
     }
 
-    /**
-     * {@code list.sort(comparingDouble(body::distanceToSqr))} with every distance measured once first. Other
-     * threads move entities during the sort, and a comparator whose answers change breaks TimSort ("Comparison
-     * method violates its general contract"). Stable, so with nothing moving the order is the same.
-     */
-    public static <E extends Entity> void sortByDistance(final List<E> list, final Entity body) {
-        final int size = list.size();
-        if (size < 2) {
-            return;
-        }
-        final double[] keys = new double[size];
-        final Integer[] order = new Integer[size];
-        for (int i = 0; i < size; i++) {
-            keys[i] = body.distanceToSqr(list.get(i));
-            order[i] = i;
-        }
-        Arrays.sort(order, (a, b) -> Double.compare(keys[a], keys[b]));
-        final Object[] copy = list.toArray();
-        for (int i = 0; i < size; i++) {
-            @SuppressWarnings("unchecked") final E e = (E) copy[order[i]];
-            list.set(i, e);
-        }
-    }
-
     // ------------------------------------------------------------------ classification
 
     /** Entities that tick on the main thread, as in Async plus a few kept serial for item/raid/boss safety. */

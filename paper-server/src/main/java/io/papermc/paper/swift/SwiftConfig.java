@@ -41,6 +41,8 @@ public final class SwiftConfig {
             List.of("Mob target searches skip the plugin ally-rule lookup while no plugin has added an ally rule (patch 0047).")),
         new Option("optimizations.nearest-first-line-of-sight", "swift.nearestFirstLineOfSight", true,
             List.of("Nearest-target searches trace line of sight nearest-first and stop at the first visible target (patch 0049).")),
+        new Option("optimizations.sensor-sort", "swift.sensorSort", true,
+            List.of("Brain sensors sort nearby entities by distance on plain numbers, same order (patch 0050).")),
         // parallel entity ticking
         new Option("parallel-entity-ticking.enabled", "swift.asyncEntities", false,
             List.of("Tick mobs on several threads at once, like the Async mod (patch 0045).",

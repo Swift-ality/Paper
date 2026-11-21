@@ -19,7 +19,7 @@ const PORT = 25571
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const OFF = ['-Dswift.selectorIndex=false', '-Dswift.selectorTagIndex=false', '-Dswift.nbtKeyFilter=false', '-Dswift.flatBrainLoop=false',
   '-Dswift.poiSearchBitset=false', '-Dswift.poiRetain=false', '-Dswift.poiEmptySearchCache=false', '-Dswift.spawnCostSkip=false',
-  '-Dswift.allyFastPath=false']
+  '-Dswift.allyFastPath=false', '-Dswift.nearestFirstLineOfSight=false', '-Dswift.sensorSort=false']
 const MODES = {
   vanilla: [...OFF, '-Dswift.asyncEntities=false'],
   swift: ['-Dswift.asyncEntities=false'],

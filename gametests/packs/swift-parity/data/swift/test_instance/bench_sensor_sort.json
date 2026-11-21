@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:bench_sensor_sort",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 300,
+  "setup_ticks": 0,
+  "required": false
+}
