@@ -1,0 +1,282 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 19:17:06 +0100
+Subject: [PATCH] Swift: box searches read packed entity boxes
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
+index 65f1159158341d9214dcec1891b640ef0f1fbcd4..5675cf02d7bf95b32ec1f51a3d3c68a03a4f9c73 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
+@@ -93,6 +93,7 @@ public final class ChunkEntitySlices {
+         this.world = world;
+ 
+         this.allEntities = new EntityCollectionBySection(this);
++        this.allEntities.swift$packed = SWIFT$PACKED_BOXES; // Swift - packed boxes: only the list box searches walk
+         this.hardCollidingEntities = new EntityCollectionBySection(this);
+         this.entitiesByClass = new Reference2ObjectOpenHashMap<>();
+         this.entitiesByType = new Reference2ObjectOpenHashMap<>();
+@@ -418,7 +419,34 @@ public final class ChunkEntitySlices {
+         }
+     }
+ 
+-    private static final class BasicEntityList<E extends Entity> {
++    // Swift start - packed boxes: box searches over the "all entities" section lists (pushing, getEntities without a
++    // class, ...) read each entity's bounding box from a flat array kept next to the list, in list order, instead of
++    // following entity -> AABB for every entity in the section. The array always equals the entities' boxes:
++    // Entity#setBoundingBox (the only writer of Entity.bb) updates it, and adding, removing and compacting move
++    // the copies along with the entities. The search compares exactly like AABB#intersects, so it finds the same
++    // entities in the same order. During the parallel entity phase box changes only mark the list stale (no thread
++    // writes an array another may be resizing); stale lists are rebuilt right after the phase, and searches during
++    // the phase, or on a stale list, use the entities' own boxes. Disable with -Dswift.packedBoxes=false.
++    public static final boolean SWIFT$PACKED_BOXES = Boolean.parseBoolean(System.getProperty("swift.packedBoxes", "true"));
++    /** Not final so tests can compare both paths inside one server (the arrays are kept up to date either way). */
++    public static volatile boolean swift$readPackedBoxes = SWIFT$PACKED_BOXES;
++    private static final java.util.concurrent.ConcurrentLinkedQueue<BasicEntityList<?>> SWIFT$STALE = new java.util.concurrent.ConcurrentLinkedQueue<>();
++    public static final java.util.concurrent.atomic.LongAdder SWIFT$PACKED_SEARCHES = new java.util.concurrent.atomic.LongAdder();
++
++    public interface SwiftBoxList {
++        void swift$boxChanged(Entity entity);
++    }
++
++    /** Rebuilds the lists whose boxes changed during the parallel phase. Called right after it, on the main thread. */
++    public static void swift$refreshStale() {
++        BasicEntityList<?> list;
++        while ((list = SWIFT$STALE.poll()) != null) {
++            list.swift$refresh();
++        }
++    }
++    // Swift end - packed boxes
++
++    private static final class BasicEntityList<E extends Entity> implements SwiftBoxList { // Swift - packed boxes
+ 
+         private static final Entity[] EMPTY = new Entity[0];
+         private static final int DEFAULT_CAPACITY = 4;
+@@ -426,6 +454,86 @@ public final class ChunkEntitySlices {
+         private E[] storage;
+         private int size;
+         private int swift$tombstones; // Swift - async entities: slots cleared during the parallel phase, compacted after it
++        // Swift start - packed boxes: minX, minY, minZ, maxX, maxY, maxZ per slot (null for lists without them)
++        private double @org.jspecify.annotations.Nullable [] swift$boxes;
++        private volatile boolean swift$stale;
++
++        private void swift$enablePacked() {
++            this.swift$boxes = new double[this.storage.length * 6];
++        }
++
++        private void swift$writeBox(final int index, final AABB bb) {
++            final double[] boxes = this.swift$boxes;
++            final int o = index * 6;
++            boxes[o] = bb.minX;
++            boxes[o + 1] = bb.minY;
++            boxes[o + 2] = bb.minZ;
++            boxes[o + 3] = bb.maxX;
++            boxes[o + 4] = bb.maxY;
++            boxes[o + 5] = bb.maxZ;
++        }
++
++        private void swift$attach(final E entity, final int index) {
++            entity.swift$boxList = this;
++            entity.swift$boxIndex = index;
++            if (io.papermc.paper.swift.async.SwiftAsync.parallel) {
++                this.swift$markStale();
++            } else {
++                this.swift$writeBox(index, entity.getBoundingBox());
++            }
++        }
++
++        private void swift$detach(final E entity) {
++            if (entity.swift$boxList == this) {
++                entity.swift$boxList = null;
++            }
++        }
++
++        @Override
++        public void swift$boxChanged(final Entity entity) {
++            if (io.papermc.paper.swift.async.SwiftAsync.parallel) {
++                this.swift$markStale();
++                return;
++            }
++            final int index = entity.swift$boxIndex;
++            if (index < this.size && this.storage[index] == entity && this.swift$boxes != null) {
++                this.swift$writeBox(index, entity.getBoundingBox());
++            } else {
++                this.swift$refresh(); // cannot happen; repair rather than read a wrong box
++            }
++        }
++
++        private void swift$markStale() {
++            if (!this.swift$stale) {
++                synchronized (this) {
++                    if (!this.swift$stale) {
++                        this.swift$stale = true;
++                        SWIFT$STALE.add(this);
++                    }
++                }
++            }
++        }
++
++        /** Copies every entity's box and slot again (after the parallel phase or a compaction). */
++        private void swift$refresh() {
++            if (this.swift$boxes == null) {
++                return;
++            }
++            if (this.swift$boxes.length < this.storage.length * 6) {
++                this.swift$boxes = new double[this.storage.length * 6];
++            }
++            final E[] storage = this.storage;
++            for (int i = 0, len = this.size; i < len; ++i) {
++                final E entity = storage[i];
++                if (entity != null) {
++                    entity.swift$boxList = this;
++                    entity.swift$boxIndex = i;
++                    this.swift$writeBox(i, entity.getBoundingBox());
++                }
++            }
++            this.swift$stale = false;
++        }
++        // Swift end - packed boxes
+ 
+         public BasicEntityList() {
+             this(0);
+@@ -449,6 +557,9 @@ public final class ChunkEntitySlices {
+             } else {
+                 this.storage = Arrays.copyOf(this.storage, this.storage.length * 2);
+             }
++            if (this.swift$boxes != null) { // Swift - packed boxes
++                this.swift$boxes = Arrays.copyOf(this.swift$boxes, this.storage.length * 6); // Swift
++            } // Swift
+         }
+ 
+         public void add(final E entity) {
+@@ -459,6 +570,9 @@ public final class ChunkEntitySlices {
+             } else {
+                 this.storage[idx] = entity;
+             }
++            if (this.swift$boxes != null) { // Swift - packed boxes
++                this.swift$attach(entity, idx); // Swift
++            } // Swift
+         }
+ 
+         public int indexOf(final E entity) {
+@@ -484,6 +598,9 @@ public final class ChunkEntitySlices {
+                     return false;
+                 }
+                 this.storage[idx] = null;
++                if (this.swift$boxes != null) { // Swift - packed boxes
++                    this.swift$detach(entity); // Swift
++                } // Swift
+                 if (this.swift$tombstones++ == 0) {
+                     io.papermc.paper.swift.async.SwiftAsync.compactAfterPhase(this::swift$compact);
+                 }
+@@ -502,9 +619,22 @@ public final class ChunkEntitySlices {
+             final E[] storage = this.storage;
+             if (idx != size) {
+                 System.arraycopy(storage, idx + 1, storage, idx, size - idx);
++                // Swift start - packed boxes: the boxes move with the entities, which get their new slots
++                if (this.swift$boxes != null) {
++                    System.arraycopy(this.swift$boxes, (idx + 1) * 6, this.swift$boxes, idx * 6, (size - idx) * 6);
++                    for (int i = idx; i < size; ++i) {
++                        if (storage[i] != null && storage[i].swift$boxList == this) {
++                            storage[i].swift$boxIndex = i;
++                        }
++                    }
++                }
++                // Swift end
+             }
+ 
+             storage[size] = null;
++            if (this.swift$boxes != null) { // Swift - packed boxes
++                this.swift$detach(entity); // Swift
++            } // Swift
+ 
+             return true;
+         }
+@@ -527,6 +657,7 @@ public final class ChunkEntitySlices {
+             }
+             this.size = to;
+             this.swift$tombstones = 0;
++            this.swift$refresh(); // Swift - packed boxes: slots moved
+         }
+         // Swift end - async entities
+ 
+@@ -540,6 +671,7 @@ public final class ChunkEntitySlices {
+         private final ChunkEntitySlices slices;
+         private final BasicEntityList<Entity>[] entitiesBySection;
+         private int count;
++        private boolean swift$packed; // Swift - packed boxes: this collection's lists keep box copies
+ 
+         public EntityCollectionBySection(final ChunkEntitySlices slices) {
+             this.slices = slices;
+@@ -558,6 +690,9 @@ public final class ChunkEntitySlices {
+ 
+             if (list == null) {
+                 this.entitiesBySection[sectionIndex] = list = new BasicEntityList<>();
++                if (this.swift$packed) { // Swift - packed boxes
++                    list.swift$enablePacked(); // Swift
++                } // Swift
+             }
+ 
+             list.add(entity);
+@@ -601,6 +736,37 @@ public final class ChunkEntitySlices {
+ 
+                 final Entity[] storage = list.storage;
+ 
++                // Swift start - packed boxes: the same test as AABB#intersects (entity box vs. search box), on the copies
++                final double[] boxes = list.swift$boxes;
++                if (boxes != null && swift$readPackedBoxes && !list.swift$stale && !io.papermc.paper.swift.async.SwiftAsync.parallel) {
++                    SWIFT$PACKED_SEARCHES.increment();
++                    final double bMinX = box.minX, bMinY = box.minY, bMinZ = box.minZ, bMaxX = box.maxX, bMaxY = box.maxY, bMaxZ = box.maxZ;
++                    final boolean verify = io.papermc.paper.swift.SwiftVerify.ENABLED;
++                    for (int i = 0, len = Math.min(storage.length, list.size()); i < len; ++i) {
++                        final Entity entity = storage[i];
++                        if (entity == null || entity == except) {
++                            continue;
++                        }
++                        final int o = i * 6;
++                        final boolean hit = boxes[o] < bMaxX && boxes[o + 3] > bMinX && boxes[o + 1] < bMaxY && boxes[o + 4] > bMinY && boxes[o + 2] < bMaxZ && boxes[o + 5] > bMinZ;
++                        if (verify) {
++                            io.papermc.paper.swift.SwiftVerify.checked();
++                            if (hit != entity.getBoundingBox().intersects(box)) {
++                                io.papermc.paper.swift.SwiftVerify.mismatch("packed boxes", entity + ": copy " + Arrays.toString(Arrays.copyOfRange(boxes, o, o + 6)) + ", box " + entity.getBoundingBox());
++                            }
++                        }
++                        if (!hit) {
++                            continue;
++                        }
++                        if (predicate != null && !predicate.test(entity)) {
++                            continue;
++                        }
++                        into.add(entity);
++                    }
++                    continue;
++                }
++                // Swift end - packed boxes
++
+                 for (int i = 0, len = Math.min(storage.length, list.size()); i < len; ++i) {
+                     final Entity entity = storage[i];
+ 
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 0d8546e9a9f559214789c0bdbca821d465b0f413..04ed9b7d1d7f06f31d0045507913b0971cdd8677 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -4757,8 +4757,19 @@ public abstract class Entity
+         if (len > 64) maxZ = minZ + 64.0;
+         this.bb = new AABB(minX, minY, minZ, maxX, maxY, maxZ);
+         // CraftBukkit end
++        // Swift start - packed boxes: keep the copy in this entity's section list (see ChunkEntitySlices) current
++        final ca.spottedleaf.moonrise.patches.chunk_system.level.entity.ChunkEntitySlices.SwiftBoxList boxList = this.swift$boxList;
++        if (boxList != null) {
++            boxList.swift$boxChanged(this);
++        }
++        // Swift end
+     }
+ 
++    // Swift start - packed boxes: the "all entities" section list this entity is in, and its slot there
++    public ca.spottedleaf.moonrise.patches.chunk_system.level.entity.ChunkEntitySlices.@org.jspecify.annotations.Nullable SwiftBoxList swift$boxList;
++    public int swift$boxIndex;
++    // Swift end
++
+     public final float getEyeHeight(final Pose pose) {
+         return this.getDimensions(pose).eyeHeight();
+     }

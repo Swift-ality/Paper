@@ -19,7 +19,7 @@ const PORT = 25571
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const OFF = ['-Dswift.selectorIndex=false', '-Dswift.selectorTagIndex=false', '-Dswift.nbtKeyFilter=false', '-Dswift.flatBrainLoop=false',
   '-Dswift.poiSearchBitset=false', '-Dswift.poiRetain=false', '-Dswift.poiEmptySearchCache=false', '-Dswift.spawnCostSkip=false',
-  '-Dswift.allyFastPath=false', '-Dswift.nearestFirstLineOfSight=false', '-Dswift.sensorSort=false']
+  '-Dswift.allyFastPath=false', '-Dswift.nearestFirstLineOfSight=false', '-Dswift.sensorSort=false', '-Dswift.spawnLazyBiome=false', '-Dswift.packedBoxes=false']
 const MODES = {
   vanilla: [...OFF, '-Dswift.asyncEntities=false'],
   swift: ['-Dswift.asyncEntities=false'],
@@ -31,10 +31,13 @@ const MODES = {
   nolos: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.nearestFirstLineOfSight=false'],
   // async pathfinding (opt-in) on top of 'swift' (serial ticking) and on top of 'fork'
   asyncpath: ['-Dswift.asyncEntities=false', '-Dswift.asyncPathfinding=true'],
-  forkpath: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.asyncPathfinding=true']
+  forkpath: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.asyncPathfinding=true'],
+  // single switches off, on top of 'swift' (serial ticking)
+  nopacked: ['-Dswift.asyncEntities=false', '-Dswift.packedBoxes=false'],
+  nolazybiome: ['-Dswift.asyncEntities=false', '-Dswift.spawnLazyBiome=false']
 }
 const JARS = { paper: 'paper-upstream.jar' }
-const WARMUP_S = Number(process.env.WARMUP_S || 45)
+const WARMUP_S = Number(process.env.WARMUP_S || (process.env.SCENARIO === 'spawn' ? 150 : 45))
 const MEASURE_S = 60
 // SCENARIO=farm (default): 400 villagers + 1000 animals at noon; SCENARIO=zombies: 3000 zombies at midnight;
 // SCENARIO=huge: 10000 zombies + 10000 villagers at midnight, 61x61 pen split by a glass wall (zombies see the
@@ -47,12 +50,29 @@ function prepare () {
   for (const d of ['world', 'world_nether', 'world_the_end']) fs.rmSync(path.join(RUN, d), { recursive: true, force: true })
   fs.rmSync(path.join(RUN, 'config', 'swift.yml'), { force: true })
   fs.writeFileSync(path.join(RUN, 'eula.txt'), 'eula=true\n')
+  const spawn = SCENARIO === 'spawn'
   fs.writeFileSync(path.join(RUN, 'server.properties'), [
-    'online-mode=false', `server-port=${PORT}`, 'level-type=minecraft\\:flat', 'level-seed=swift-bench',
-    'generator-settings={"layers"\\:[{"block"\\:"minecraft\\:bedrock","height"\\:1},{"block"\\:"minecraft\\:dirt","height"\\:2},{"block"\\:"minecraft\\:grass_block","height"\\:1}],"biome"\\:"minecraft\\:plains"}',
-    'generate-structures=false', 'spawn-protection=0', 'view-distance=6', 'simulation-distance=6',
-    'spawn-monsters=false', 'spawn-animals=false', 'max-players=4', 'white-list=false', 'motd=swift-bench'
+    'online-mode=false', `server-port=${PORT}`,
+    // spawn: a normal world (mixed biomes, caves, oceans) with a fixed seed; everything else: a flat plains world
+    ...(spawn ? ['level-seed=swift-spawn', 'generate-structures=true', 'view-distance=10', 'simulation-distance=10']
+      : ['level-type=minecraft\\:flat', 'level-seed=swift-bench',
+        'generator-settings={"layers"\\:[{"block"\\:"minecraft\\:bedrock","height"\\:1},{"block"\\:"minecraft\\:dirt","height"\\:2},{"block"\\:"minecraft\\:grass_block","height"\\:1}],"biome"\\:"minecraft\\:plains"}',
+        'generate-structures=false', 'view-distance=6', 'simulation-distance=6']),
+    'spawn-protection=0', `spawn-monsters=${spawn}`, `spawn-animals=${spawn}`, 'max-players=12', 'white-list=false', 'motd=swift-bench'
   ].join('\n') + '\n')
+  // spawn: the spawn settings of a real 19-player server profile (attempts every tick, normal caps); other
+  // scenarios get Bukkit's defaults back
+  const bukkit = path.join(RUN, 'bukkit.yml')
+  if (spawn) {
+    fs.writeFileSync(bukkit, [
+      '# swift-bench spawn scenario', 'spawn-limits:', '  monsters: 70', '  animals: 10', '  water-animals: 15', '  water-ambient: 20',
+      '  water-underground-creature: 5', '  axolotls: 5', '  ambient: 15', 'ticks-per:', '  animal-spawns: 400', '  monster-spawns: 1',
+      '  water-spawns: 1', '  water-ambient-spawns: 1', '  water-underground-creature-spawns: 1', '  axolotl-spawns: 1', '  ambient-spawns: 1',
+      '  autosave: 6000'
+    ].join('\n') + '\n')
+  } else if (fs.existsSync(bukkit) && fs.readFileSync(bukkit, 'utf8').startsWith('# swift-bench spawn scenario')) {
+    fs.rmSync(bukkit)
+  }
 }
 
 function startServer (mode, flags) {
@@ -131,15 +151,34 @@ async function runMode (mode) {
   const proc = await startServer(mode, MODES[mode])
   const bot = await joinBot('Bench')
   await command(proc, 'op Bench')
-  await command(proc, 'gamerule spawn_mobs false')
+  await command(proc, `gamerule spawn_mobs ${SCENARIO === 'spawn'}`)
   await command(proc, 'gamerule advance_time false')
   await command(proc, SCENARIO === 'farm' ? 'time set noon' : 'time set midnight')
+  if (SCENARIO === 'spawn') {
+    // SCENARIO=spawn: natural spawning only. Ten creative players standing 600 blocks apart in a normal world
+    // (each ticks its own chunks), at midnight; nothing summoned. Every mob is cleared every 3 s (no drops) so the
+    // caps never fill and every ticking chunk keeps attempting spawns, as on a busy server. The world generates
+    // during the warm-up; the players stand still, so nothing generates during the measurement.
+    await command(proc, 'gamerule mob_drops false')
+    await command(proc, 'gamemode creative Bench')
+    await command(proc, 'tp Bench 0 150 0')
+    const extra = []
+    for (let i = 1; i < 10; i++) {
+      const b = await joinBot('Bench' + (i + 1))
+      extra.push(b)
+      await command(proc, `gamemode creative Bench${i + 1}`)
+      await command(proc, `tp Bench${i + 1} ${(i % 4) * 600} 150 ${Math.floor(i / 4) * 600}`)
+    }
+    bot.extra = extra
+    proc.clearMobs = setInterval(() => proc.stdin.write('kill @e[type=!player]\n'), 3000)
+  } else {
   await command(proc, 'gamemode spectator Bench')
   await command(proc, 'tp Bench 0 -50 0')
+  }
   // dense: 2000 villagers in a 19x19 pen, the same ~5.5 per block as the villager half of 'huge', but light
   // enough that every server holds 20 TPS, so each runs the same number of ticks (fair for counting deaths)
-  const R = SCENARIO === 'huge' || SCENARIO === 'chase' ? 30 : SCENARIO === 'dense' ? 9 : 22
-  for (let y = -60; y <= -58; y++) {
+  const R = SCENARIO === 'spawn' ? -1 : SCENARIO === 'huge' || SCENARIO === 'chase' ? 30 : SCENARIO === 'dense' ? 9 : 22
+  for (let y = -60; y <= -58 && R > 0; y++) {
     await command(proc, `fill ${-R - 1} ${y} ${-R - 1} ${R + 1} ${y} ${-R - 1} glass`, 50)
     await command(proc, `fill ${-R - 1} ${y} ${R + 1} ${R + 1} ${y} ${R + 1} glass`, 50)
     await command(proc, `fill ${-R - 1} ${y} ${-R - 1} ${-R - 1} ${y} ${R + 1} glass`, 50)
@@ -159,6 +198,7 @@ async function runMode (mode) {
     : SCENARIO === 'zombies' ? [['zombie', 3000]]
     : SCENARIO === 'huge' ? [['zombie', 10000], ['villager', 10000]]
     : SCENARIO === 'dense' ? [['villager', 2000]]
+    : SCENARIO === 'spawn' ? []
     : [['villager', 400], ['cow', 300], ['sheep', 300], ['pig', 200], ['chicken', 200]]
   let n = 0
   for (const [type, count] of plan) {
@@ -190,7 +230,9 @@ async function runMode (mode) {
   const spark = (sparkOut.join(' ').match(SPARK_URL) || [null])[0]
   const tps = (await command(proc, 'tps', 0, /TPS from last/)).find(l => /TPS/.test(l)) || ''
   const alive = (await command(proc, 'execute if entity @e[type=!player]', 0, COUNT)).find(l => COUNT.test(l)) || ''
+  if (proc.clearMobs) clearInterval(proc.clearMobs)
   bot.end()
+  for (const b of bot.extra || []) b.end()
   await command(proc, 'stop', 100)
   await new Promise(r => proc.on('exit', r))
   const result = { mode, avg1m: final?.m1[0], min1m: final?.m1[1], max1m: final?.m1[2], samples10s: samples, spark, tps: tps.replace(/^.*?TPS/, 'TPS').trim(), alive: alive.replace(/^.*INFO\]: /, '').trim() }

@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 19:10:20 +0100
+Subject: [PATCH] Swift: natural spawning looks up the biome only for water
+ ambient mobs
+
+
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 60a6d1b881e0f8db0269f394af3c787639c15ef2..b017b7f0bc3c3394eaa2315bb6b92b42386852ea 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -437,6 +437,12 @@ public final class NaturalSpawner {
+         final RandomSource random,
+         final BlockPos pos
+     ) {
++        // Swift start - spawn biome skip: the biome is only needed for water ambient mobs (a pure lookup, so
++        // skipping it for every other category changes nothing; the random roll still happens only after it)
++        if (io.papermc.paper.swift.spawn.SpawnCosts.lazyBiome && mobCategory != MobCategory.WATER_AMBIENT) {
++            return mobsAt(level, structureManager, generator, mobCategory, pos).getRandom(random);
++        }
++        // Swift end
+         Holder<Biome> biome = level.getBiome(pos);
+         return mobCategory == MobCategory.WATER_AMBIENT && biome.is(BiomeTags.REDUCED_WATER_AMBIENT_SPAWNS) && random.nextFloat() < 0.98F
+             ? Optional.empty()

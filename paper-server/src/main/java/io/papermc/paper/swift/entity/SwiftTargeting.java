@@ -184,6 +184,11 @@ public final class SwiftTargeting {
         // fast first: it may only trace a subset of the rays, the vanilla loop then fills the cache like vanilla
         final T fast = fast(level, entities, conditions, source, x, y, z);
         final T slow = vanilla(level, entities, conditions, source, x, y, z);
+        // during the parallel entity phase other threads move the candidates between the two searches, so the
+        // two answers may differ without either being wrong (as for the sensor sort); compare only serially
+        if (io.papermc.paper.swift.async.SwiftAsync.parallel) {
+            return slow;
+        }
         SwiftVerify.checked();
         if (fast != slow) {
             SwiftVerify.mismatch("nearest-first line of sight", source + " picked " + fast + ", vanilla picks " + slow + " of " + entities.size() + " candidates");

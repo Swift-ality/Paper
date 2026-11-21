@@ -31,6 +31,11 @@ import org.jspecify.annotations.Nullable;
 public final class SpawnCosts {
     /** Not final so tests can compare both paths inside one server. */
     public static volatile boolean enabled = Boolean.parseBoolean(System.getProperty("swift.spawnCostSkip", "true"));
+    /**
+     * Patch 0053: natural spawning looks up the biome only for water ambient mobs, the one category that uses it
+     * ({@code -Dswift.spawnLazyBiome=false} to disable). Not final so tests can compare both paths.
+     */
+    public static volatile boolean lazyBiome = Boolean.parseBoolean(System.getProperty("swift.spawnLazyBiome", "true"));
     private static final Set<EntityType<?>> TYPES_WITH_COST = ConcurrentHashMap.newKeySet();
 
     private SpawnCosts() {

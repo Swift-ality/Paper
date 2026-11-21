@@ -449,6 +449,7 @@ public final class SwiftAsync {
         } finally {
             parallel = false;
             compactLists();
+            ca.spottedleaf.moonrise.patches.chunk_system.level.entity.ChunkEntitySlices.swift$refreshStale(); // packed boxes changed during the phase
         }
     }
 

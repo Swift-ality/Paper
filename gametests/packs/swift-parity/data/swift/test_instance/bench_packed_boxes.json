@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:bench_packed_boxes",
+  "environment": "swift:default",
+  "structure": "swift:arena",
+  "max_ticks": 100,
+  "setup_ticks": 0,
+  "required": false
+}

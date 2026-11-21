@@ -35,6 +35,8 @@ exception to the "same gameplay" rule and is off by default (see its section).
 | 0050 | Brain sensors sort nearby entities on plain numbers (same order) | `swift.sensorSort` |
 | 0051 | Ground mobs search paths on pathfinding threads (**mobs react one tick later**) | off unless `swift.asyncPathfinding=true` |
 | 0052 | Parallel ticking: village-distance queries take turns (fixes a crash in the tracker's queue) | part of `swift.asyncEntities` |
+| 0053 | Natural spawning looks up the biome only for water ambient mobs | `swift.spawnLazyBiome` |
+| 0054 | Box searches (pushing, `getEntities`) read entity boxes from flat copies, same order | `swift.packedBoxes` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -459,6 +461,61 @@ main thread, then 600 distance queries at once on the worker threads (180,000 in
 failed on the first run, and the corrupted tracker even broke the single-thread check afterwards. After the
 fix nothing throws, and every parallel answer equals a single-thread query. The test runs on the worker
 threads whatever the suite setting.
+
+---
+## 0053: natural spawning looks up the biome only when it is used (`swift-invasive`)
+
+**Before:** every natural spawn attempt (`NaturalSpawner#getRandomSpawnMobAt`) looked up the biome at the
+position, but only used it for water ambient mobs (in reduced-water-ambient biomes such as rivers, 98% of
+those attempts are skipped). For every other category the lookup was thrown away. In a 19-player server
+profile (simulation distance 10, spawns every tick) that unused lookup was 11 of the 47 ms/tick spent on
+spawning.
+
+**Now:** the biome is only looked up for water ambient attempts. A biome lookup has no side effects, and the
+random roll still comes after it, so the same mobs spawn.
+
+**Gain: small.** Bench `SCENARIO=spawn` (a normal world, 10 still creative players 600 blocks apart,
+simulation distance 10, the 19-player server's spawn settings, every mob cleared every 3 s so the caps never
+fill), each mode run twice: picking the spawn mob costs 1.56 / 1.62 ms/tick without the skip and 1.51 / 1.35
+ms with it, about 10% less; total MSPT is the same within noise. The lookup itself is gone, but the next one
+(the mob list from the biome's spawn settings, which reads the same biome data) now pays the memory misses the
+first one used to pay. So the 11 ms in the profile above is not what this saves there; expect a few ms.
+
+**Tests:** `spawn_lazy_biome_differential`: a 24x24 arena, half river and half plains, with a water pool, a
+dark stone room and open grass, and a flying creative player above. 2,800 natural spawn attempts, 400 for
+each category, from random start positions. Each attempt runs four times with the level's random seeded
+the same: switch off, on, off, on. The spawned mobs (type, position, rotation) and the random state
+afterwards must be identical, and the two runs with the same setting must agree (otherwise the test's
+cleanup is broken). Result: about 290 mobs spawn per run, all identical.
+
+---
+## 0054: box searches read entity boxes from flat copies (`swift-invasive`)
+
+**Before:** every entity's push check (`LivingEntity#pushEntities` -> `Level#getPushableEntities`), and every
+other box search without an entity class, walks each overlapping 16x16x16 section's entity list and follows
+entity -> AABB for every entity in it. In a crowd that pointer chasing is the cost: 12% of the tick in the
+farm bench, and 16% of the entity work in the 20k bench.
+
+**Now:** each "all entities" section list keeps a flat `double[]` copy of its entities' boxes, in list order.
+The search reads the copies and compares exactly like `AABB#intersects`, so it finds the same entities in
+the same order. Keeping the copies in sync:
+- `Entity#setBoundingBox` is the only place an entity's box is set, and it updates the copy.
+- Adding, removing and compacting a list move the copies along with the entities.
+- During the parallel entity phase (0045) box changes only mark the list stale; stale lists are rebuilt
+  right after the phase. Searches during the phase, or on a stale list, use the entities' own boxes, so a
+  worker never reads half a box.
+
+**Gain:** farm bench (1400 mobs, serial ticking), each mode run twice: 8.0 / 8.5 ms/tick with the copies,
+8.8 / 9.1 ms without (about 7%); the push checks went from 1.33 to 1.00 ms/tick. Microbench
+`bench_packed_boxes` (400 cows in one chunk, so the list stays in the CPU cache): 1.15x. The gain grows with
+crowds that do not fit in the cache. Parallel ticking does not use the copies during the phase.
+
+**Tests:** `boxes_differential`: 150 entities in the arena (cows and zombies with AI, slimes of sizes 1-4,
+items, armor stands) for 150 ticks. Every tick some are teleported (some into the next section and back),
+killed or spawned. Then each entity's pushing search and two wider box searches run with the copies and
+with the entities' own boxes. 63,435 searches compared, all identical, same order. `-Dswift.verify=true`
+checks every copy against the entity's own box during every search. The whole suite also runs with
+parallel ticking, which exercises the stale-and-rebuild path.
 
 ---
 
