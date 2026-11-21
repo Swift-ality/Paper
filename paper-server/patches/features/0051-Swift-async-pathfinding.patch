@@ -1,0 +1,706 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 13:02:42 +0100
+Subject: [PATCH] Swift: async pathfinding
+
+
+diff --git a/net/minecraft/world/entity/Mob.java b/net/minecraft/world/entity/Mob.java
+index 169cc606f8a16881baec8bbd2fff2742f623d3e0..584fe4ea5b2173cba8d0fd5e89944f87a5b5e49b 100644
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -223,6 +223,7 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+     @Override
+     public void inactiveTick() {
+         super.inactiveTick();
++        this.navigation.swift$resolvePending(); // Swift - async pathfinding: apply last tick's paths
+         if (!this.aware) return; // Paper - Do not tick AI for inactive unaware mobs
+         final boolean isThrottled = this.level().paperConfig().entities.behavior.inactiveMobGoalSelectorThrottleRate.enabled() && inactiveTickDisableCounter++ % this.level().paperConfig().entities.behavior.inactiveMobGoalSelectorThrottleRate.intValue() != 0; // Paper - Throttle inactive goal selector ticking
+         if (this.goalSelector.inactiveTick() && !isThrottled) {
+@@ -819,6 +820,7 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+ 
+     @Override
+     protected final void serverAiStep() {
++        this.navigation.swift$resolvePending(); // Swift - async pathfinding: apply last tick's paths
+         this.noActionTime++;
+         // Paper start - Allow nerfed mobs to jump and float
+         if (!this.aware) {
+diff --git a/net/minecraft/world/entity/ai/behavior/MoveToTargetSink.java b/net/minecraft/world/entity/ai/behavior/MoveToTargetSink.java
+index b40da004b5281a041ee896ae176bfb9c4660f353..f84691ea9d9a6340e48454e76a24106d390fdbe7 100644
+--- a/net/minecraft/world/entity/ai/behavior/MoveToTargetSink.java
++++ b/net/minecraft/world/entity/ai/behavior/MoveToTargetSink.java
+@@ -122,6 +122,31 @@ public class MoveToTargetSink extends Behavior<Mob> {
+         Brain<?> brain = body.getBrain();
+         if (this.reachedTarget(body, walkTarget)) {
+             brain.eraseMemory(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE);
++        // Swift start - async pathfinding: the search is still running; walk as soon as the path is applied, and
++        // do what follows (the "can't reach" memory, the partial step when there is no path) at that moment
++        } else if (this.path != null && this.path.swift$isPending() && this.path.swift$job() != null) {
++            final Path pending = this.path;
++            pending.swift$job().whenApplied(found -> {
++                if (found && pending.canReach()) {
++                    brain.eraseMemory(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE);
++                } else if (!brain.hasMemoryValue(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE)) {
++                    brain.setMemory(MemoryModuleType.CANT_REACH_WALK_TARGET_SINCE, timestamp);
++                }
++                if (!found && this.path == pending) {
++                    Vec3 partialStep = DefaultRandomPos.getPosTowards((PathfinderMob)body, 10, 7, Vec3.atBottomCenterOf(targetPos), (float) (Math.PI / 2));
++                    Path partial = partialStep == null ? null : body.getNavigation().createPath(partialStep.x, partialStep.y, partialStep.z, 0);
++                    if (partial != null) {
++                        this.path = partial;
++                        brain.setMemory(MemoryModuleType.PATH, partial);
++                        body.getNavigation().moveTo(partial, this.speedModifier);
++                    } else {
++                        // no way at all: as if the behaviour had not started (it stops on its next check)
++                        brain.eraseMemory(MemoryModuleType.WALK_TARGET);
++                    }
++                }
++            });
++            return true;
++        // Swift end
+         } else {
+             boolean canReach = this.path != null && this.path.canReach();
+             if (canReach) {
+diff --git a/net/minecraft/world/entity/ai/navigation/PathNavigation.java b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
+index f042ddf76f3a39c389e099f09dd5cb07483d2046..c9d64870cf99acd6cc99ef8600336a6ee9b6464c 100644
+--- a/net/minecraft/world/entity/ai/navigation/PathNavigation.java
++++ b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
+@@ -55,6 +55,82 @@ public abstract class PathNavigation {
+     public final PathFinder pathFinder;
+     private boolean isStuck;
+     private float requiredPathLength = 16.0F;
++    // Swift start - async pathfinding (SwiftPathfinding): paths requested and not yet applied, in request order;
++    // the pending path moveTo() installed, with the path it replaced and its speed; block changes seen meanwhile
++    private final java.util.ArrayList<Path> swift$pending = new java.util.ArrayList<>(2);
++    private @Nullable Path swift$moveToPath;
++    private @Nullable Path swift$moveToPrevious;
++    private double swift$moveToSpeed;
++    private boolean swift$moveToEntity;
++    private java.util.@Nullable List<BlockPos> swift$blockChanges;
++
++    /** Applies every path this navigation requested and has not applied yet (start of the mob's AI step). */
++    public void swift$resolvePending() {
++        while (!this.swift$pending.isEmpty()) {
++            final Path first = this.swift$pending.get(0);
++            if (first.swift$isPending()) {
++                first.swift$resolve(); // swift$onResolved removes it
++            } else {
++                this.swift$removePending(first); // applied elsewhere already
++            }
++        }
++    }
++
++    // by identity: Path.equals compares contents (and two pending requests can come out equal)
++    private void swift$removePending(final Path path) {
++        for (int i = 0; i < this.swift$pending.size(); i++) {
++            if (this.swift$pending.get(i) == path) {
++                this.swift$pending.remove(i);
++                return;
++            }
++        }
++    }
++
++    /**
++     * A requested path's search finished and was filled in: what createPath and moveTo would have done with the
++     * result, now. {@code found} is false when the search found no path (createPath would have returned null).
++     */
++    public void swift$onResolved(final Path path, final boolean found, final int reachRange) {
++        this.swift$removePending(path);
++        if (found && path.getTarget() != null) {
++            this.targetPos = path.getTarget();
++            this.reachRange = reachRange;
++            this.resetStuckTimeout();
++        }
++        if (this.path == path) {
++            if (this.swift$moveToPath == path) {
++                this.swift$moveToPath = null;
++                this.path = this.swift$moveToPrevious;
++                this.swift$moveToPrevious = null;
++                final boolean moving = this.moveTo(found ? path : null, this.swift$moveToSpeed);
++                if (this.swift$moveToEntity) {
++                    if (moving) {
++                        this.lastFailure = 0;
++                        this.pathfindFailures = 0;
++                    } else {
++                        this.pathfindFailures++;
++                        this.lastFailure = net.minecraft.server.MinecraftServer.currentTick;
++                    }
++                }
++            } else if (!found) {
++                this.path = null;
++            }
++            final java.util.List<BlockPos> changes = this.swift$blockChanges;
++            this.swift$blockChanges = null;
++            if (changes != null) {
++                for (final BlockPos pos : changes) {
++                    if (this.shouldRecomputePath(pos)) {
++                        this.recomputePath();
++                        break;
++                    }
++                }
++            }
++        } else if (this.swift$moveToPath == path) {
++            this.swift$moveToPath = null;
++            this.swift$moveToPrevious = null;
++        }
++    }
++    // Swift end
+ 
+     public PathNavigation(final Mob mob, final Level level) {
+         this.mob = mob;
+@@ -167,6 +243,15 @@ public abstract class PathNavigation {
+             return null;
+         }
+ 
++        // Swift start - async pathfinding: a search still running for these targets answers this request too
++        if (this.path != null && this.path.swift$isPending()) {
++            final io.papermc.paper.swift.entity.SwiftPathfinding.Job job = this.path.swift$job();
++            if (job != null && targets.containsAll(job.targets())) {
++                return this.path;
++            }
++            this.path.swift$resolve();
++        }
++        // Swift end
+         if (this.path != null && !this.path.isDone() && targets.contains(this.targetPos)) {
+             return this.path;
+         }
+@@ -193,6 +278,21 @@ public abstract class PathNavigation {
+         BlockPos fromPos = above ? this.mob.blockPosition().above() : this.mob.blockPosition();
+         int radius = (int)(maxPathLength + radiusOffset);
+         PathNavigationRegion region = new PathNavigationRegion(this.level, fromPos.offset(-radius, -radius, -radius), fromPos.offset(radius, radius, radius));
++        // Swift start - async pathfinding: the search runs on a pathfinding thread; the bookkeeping below happens
++        // when the path is applied (swift$onResolved)
++        if (io.papermc.paper.swift.entity.SwiftPathfinding.eligible(this, this.mob)) {
++            final Path pending = io.papermc.paper.swift.entity.SwiftPathfinding.request(this, region, this.mob, targets, maxPathLength, reachRange, this.maxVisitedNodesMultiplier);
++            profiler.pop();
++            if (pending != null) {
++                // a mob whose AI step never runs (NoAI, a plugin asking for paths) applies its oldest one here
++                if (this.swift$pending.size() >= 4) {
++                    this.swift$pending.get(0).swift$resolve();
++                }
++                this.swift$pending.add(pending);
++            }
++            return pending;
++        }
++        // Swift end
+         Path path = this.pathFinder.findPath(region, this.mob, targets, maxPathLength, reachRange, this.maxVisitedNodesMultiplier);
+         profiler.pop();
+         if (path != null && path.getTarget() != null) {
+@@ -228,6 +328,13 @@ public abstract class PathNavigation {
+         }
+         // Paper end - Perf: Optimise pathfinding
+         Path newPath = this.createPath(target, reachRange);
++        // Swift start - async pathfinding: success or failure is counted when the path is applied
++        if (newPath != null && newPath.swift$isPending()) {
++            this.moveTo(newPath, speedModifier);
++            this.swift$moveToEntity = this.swift$moveToPath == newPath;
++            return true;
++        }
++        // Swift end
+         // Paper start - Perf: Optimise pathfinding
+         if (newPath != null && this.moveTo(newPath, speedModifier)) {
+             this.lastFailure = 0;
+@@ -242,6 +349,21 @@ public abstract class PathNavigation {
+     }
+ 
+     public boolean moveTo(final @Nullable Path newPath, final double speedModifier) {
++        // Swift start - async pathfinding: install the pending path; the rest of moveTo runs when it is applied
++        if (newPath != null && newPath.swift$isPending()) {
++            if (this.path != newPath) {
++                if (this.path != null && this.path.swift$isPending()) {
++                    this.path.swift$resolve();
++                }
++                this.swift$moveToPrevious = this.path;
++                this.path = newPath;
++            }
++            this.swift$moveToPath = newPath;
++            this.swift$moveToSpeed = speedModifier;
++            this.swift$moveToEntity = false;
++            return true;
++        }
++        // Swift end
+         if (newPath == null) {
+             this.path = null;
+             return false;
+@@ -273,6 +395,9 @@ public abstract class PathNavigation {
+ 
+     public void tick() {
+         this.tick++;
++        if (this.path != null && this.path.swift$isPending()) {
++            return; // Swift - async pathfinding: no path to follow until it is applied
++        }
+         if (this.hasDelayedRecomputation) {
+             this.recomputePath();
+         }
+@@ -394,7 +519,7 @@ public abstract class PathNavigation {
+     }
+ 
+     public boolean isDone() {
+-        return this.path == null || this.path.isDone();
++        return this.path == null || !this.path.swift$isPending() && this.path.isDone(); // Swift - a pending path is not done
+     }
+ 
+     public boolean isInProgress() {
+@@ -461,6 +586,14 @@ public abstract class PathNavigation {
+     public boolean shouldRecomputePath(final BlockPos pos) {
+         if (this.hasDelayedRecomputation) {
+             return false;
++        // Swift start - async pathfinding: decided when the path is applied (the search may predate the change)
++        } else if (this.path != null && this.path.swift$isPending()) {
++            if (this.swift$blockChanges == null) {
++                this.swift$blockChanges = new java.util.ArrayList<>(2);
++            }
++            this.swift$blockChanges.add(pos.immutable());
++            return false;
++        // Swift end
+         } else if (this.path != null && !this.path.isDone() && this.path.getNodeCount() != 0) {
+             Node target = this.path.getEndNode();
+             Vec3 middlePos = new Vec3((target.x + this.mob.getX()) / 2.0, (target.y + this.mob.getY()) / 2.0, (target.z + this.mob.getZ()) / 2.0);
+diff --git a/net/minecraft/world/level/pathfinder/Path.java b/net/minecraft/world/level/pathfinder/Path.java
+index 551bb7fac42ccd9ccd6ea4a5abc766e970180a77..19f9a15614d1238c5527c1833571664bedbac986 100644
+--- a/net/minecraft/world/level/pathfinder/Path.java
++++ b/net/minecraft/world/level/pathfinder/Path.java
+@@ -40,9 +40,74 @@ public final class Path {
+     public final List<Node> nodes;
+     private Path.@Nullable DebugData debugData;
+     private int nextNodeIndex;
+-    private final BlockPos target;
+-    private final float distToTarget;
+-    private final boolean reached;
++    private BlockPos target; // Swift - not final: a pending path is filled in when its search finishes
++    private float distToTarget; // Swift
++    private boolean reached; // Swift
++    // Swift start - async pathfinding: while the search for this path runs, every method first waits for it
++    // (or runs it on the calling thread if no pathfinding thread has started it yet). Cleared once filled in.
++    private volatile io.papermc.paper.swift.entity.SwiftPathfinding.@Nullable Job swift$job;
++
++    private Path(final io.papermc.paper.swift.entity.SwiftPathfinding.Job job) {
++        this.nodes = new java.util.ArrayList<>();
++        this.target = BlockPos.ZERO;
++        this.distToTarget = Float.MAX_VALUE;
++        this.reached = false;
++        this.swift$job = job;
++    }
++
++    public static Path swift$pending(final io.papermc.paper.swift.entity.SwiftPathfinding.Job job) {
++        return new Path(job);
++    }
++
++    /** True while the search for this path has not been applied to it (no method has needed the result yet). */
++    public boolean swift$isPending() {
++        return this.swift$job != null;
++    }
++
++    public io.papermc.paper.swift.entity.SwiftPathfinding.@Nullable Job swift$job() {
++        return this.swift$job;
++    }
++
++    /** Waits for the search (if any) and fills this path in. */
++    public void swift$resolve() {
++        final io.papermc.paper.swift.entity.SwiftPathfinding.Job job = this.swift$job;
++        if (job != null) {
++            job.resolve();
++        }
++    }
++
++    /** This path, or null when its search found none (a synchronous search would have returned null). */
++    public @Nullable Path swift$orNull() {
++        final io.papermc.paper.swift.entity.SwiftPathfinding.Job job = this.swift$job;
++        if (job != null) {
++            job.resolve();
++            return job.foundNone() ? null : this;
++        }
++        return this.swift$none ? null : this;
++    }
++
++    private boolean swift$none;
++
++    /** Called once by the job, holding its lock: copies the search result in (an empty path if there is none). */
++    public void swift$fill(final @Nullable Path result) {
++        if (result != null) {
++            this.nodes.addAll(result.nodes);
++            this.target = result.target;
++            this.distToTarget = result.distToTarget;
++            this.reached = result.reached;
++            this.debugData = result.debugData;
++        } else {
++            this.swift$none = true;
++        }
++        this.swift$job = null;
++    }
++
++    private void swift$await() {
++        if (this.swift$job != null) {
++            this.swift$resolve();
++        }
++    }
++    // Swift end
+ 
+     public Path(final List<Node> nodes, final BlockPos target, final boolean reached) {
+         this.nodes = nodes;
+@@ -52,48 +117,59 @@ public final class Path {
+     }
+ 
+     public void advance() {
++        this.swift$await(); // Swift
+         this.nextNodeIndex++;
+     }
+ 
+     public boolean notStarted() {
++        this.swift$await(); // Swift
+         return this.nextNodeIndex <= 0;
+     }
+ 
+     public boolean isDone() {
++        this.swift$await(); // Swift
+         return this.nextNodeIndex >= this.nodes.size();
+     }
+ 
+     public @Nullable Node getEndNode() {
++        this.swift$await(); // Swift
+         return !this.nodes.isEmpty() ? this.nodes.get(this.nodes.size() - 1) : null;
+     }
+ 
+     public Node getNode(final int i) {
++        this.swift$await(); // Swift
+         return this.nodes.get(i);
+     }
+ 
+     public void truncateNodes(final int index) {
++        this.swift$await(); // Swift
+         if (this.nodes.size() > index) {
+             this.nodes.subList(index, this.nodes.size()).clear();
+         }
+     }
+ 
+     public void replaceNode(final int index, final Node replaceWith) {
++        this.swift$await(); // Swift
+         this.nodes.set(index, replaceWith);
+     }
+ 
+     public int getNodeCount() {
++        this.swift$await(); // Swift
+         return this.nodes.size();
+     }
+ 
+     public int getNextNodeIndex() {
++        this.swift$await(); // Swift
+         return this.nextNodeIndex;
+     }
+ 
+     public void setNextNodeIndex(final int nextNodeIndex) {
++        this.swift$await(); // Swift
+         this.nextNodeIndex = nextNodeIndex;
+     }
+ 
+     public Vec3 getEntityPosAtNode(final Entity entity, final int index) {
++        this.swift$await(); // Swift
+         Node node = this.nodes.get(index);
+         double x = node.x + (int)(entity.getBbWidth() + 1.0F) * 0.5;
+         double y = node.y;
+@@ -102,31 +178,40 @@ public final class Path {
+     }
+ 
+     public BlockPos getNodePos(final int index) {
++        this.swift$await(); // Swift
+         return this.nodes.get(index).asBlockPos();
+     }
+ 
+     public Vec3 getNextEntityPos(final Entity entity) {
++        this.swift$await(); // Swift
+         return this.getEntityPosAtNode(entity, this.nextNodeIndex);
+     }
+ 
+     public BlockPos getNextNodePos() {
++        this.swift$await(); // Swift
+         return this.nodes.get(this.nextNodeIndex).asBlockPos();
+     }
+ 
+     public Node getNextNode() {
++        this.swift$await(); // Swift
+         return this.nodes.get(this.nextNodeIndex);
+     }
+ 
+     public @Nullable Node getPreviousNode() {
++        this.swift$await(); // Swift
+         return this.nextNodeIndex > 0 ? this.nodes.get(this.nextNodeIndex - 1) : null;
+     }
+ 
+     public boolean sameAs(final @Nullable Path path) {
++        this.swift$await(); // Swift
++        if (path != null) path.swift$await(); // Swift
+         return path != null && this.nodes.equals(path.nodes);
+     }
+ 
+     @Override
+     public boolean equals(final Object obj) {
++        this.swift$await(); // Swift
++        if (obj instanceof Path other) other.swift$await(); // Swift
+         return obj instanceof Path path
+             && this.nextNodeIndex == path.nextNodeIndex
+             && this.debugData == path.debugData
+@@ -137,10 +222,12 @@ public final class Path {
+ 
+     @Override
+     public int hashCode() {
++        this.swift$await(); // Swift
+         return this.nextNodeIndex + this.nodes.hashCode() * 31;
+     }
+ 
+     public boolean canReach() {
++        this.swift$await(); // Swift
+         return this.reached;
+     }
+ 
+@@ -150,23 +237,28 @@ public final class Path {
+     }
+ 
+     public Path.@Nullable DebugData debugData() {
++        this.swift$await(); // Swift
+         return this.debugData;
+     }
+ 
+     @Override
+     public String toString() {
++        this.swift$await(); // Swift
+         return "Path(length=" + this.nodes.size() + ")";
+     }
+ 
+     public BlockPos getTarget() {
++        this.swift$await(); // Swift
+         return this.target;
+     }
+ 
+     public float getDistToTarget() {
++        this.swift$await(); // Swift
+         return this.distToTarget;
+     }
+ 
+     public Path copy() {
++        this.swift$await(); // Swift
+         Path result = new Path(this.nodes, this.target, this.reached);
+         result.debugData = this.debugData;
+         result.nextNodeIndex = this.nextNodeIndex;
+diff --git a/net/minecraft/world/level/pathfinder/PathFinder.java b/net/minecraft/world/level/pathfinder/PathFinder.java
+index b903ae067130b460fca782fa8f37e9405670eeee..f1c37c096106dbf2f2f956197940c253ae971415 100644
+--- a/net/minecraft/world/level/pathfinder/PathFinder.java
++++ b/net/minecraft/world/level/pathfinder/PathFinder.java
+@@ -66,6 +66,46 @@ public class PathFinder {
+         return path;
+     }
+ 
++    // Swift start - async pathfinding
++    public int swift$maxVisitedNodes() {
++        return this.maxVisitedNodes;
++    }
++
++    public boolean swift$capturesDebug() {
++        return this.captureDebug.getAsBoolean();
++    }
++
++    // findPath(region, ...) in two halves. swift$prepare is everything that reads
++    // the mob (main thread); swift$search is the A* search over the region, which only reads blocks and the
++    // state prepare() took, so it may run on another thread. Together they do what findPath does, except that
++    // a failed start also calls done() (this PathFinder is pooled, and the next search is for another mob).
++    public io.papermc.paper.swift.entity.SwiftPathfinding.@Nullable Search swift$prepare(
++        final PathNavigationRegion level, final Mob entity, final Set<BlockPos> targets, final float maxPathLength, final int reachRange, final float maxVisitedNodesMultiplier
++    ) {
++        this.openSet.clear();
++        this.nodeEvaluator.prepare(level, entity);
++        Node from = this.nodeEvaluator.getStart();
++        if (from == null) {
++            this.nodeEvaluator.done();
++            return null;
++        }
++
++        List<Map.Entry<Target, BlockPos>> tos = Lists.newArrayList();
++        for (BlockPos pos : targets) {
++            tos.add(new java.util.AbstractMap.SimpleEntry<>(this.nodeEvaluator.getTarget(pos.getX(), pos.getY(), pos.getZ()), pos));
++        }
++        return new io.papermc.paper.swift.entity.SwiftPathfinding.Search(this, from, tos, maxPathLength, reachRange, maxVisitedNodesMultiplier);
++    }
++
++    public @Nullable Path swift$search(final io.papermc.paper.swift.entity.SwiftPathfinding.Search search) {
++        try {
++            return this.findPath(search.from(), search.targets(), search.maxPathLength(), search.reachRange(), search.maxVisitedNodesMultiplier());
++        } finally {
++            this.nodeEvaluator.done();
++        }
++    }
++    // Swift end
++
+     private @Nullable Path findPath(
+         final Node from, final List<Map.Entry<Target, BlockPos>> targets, final float maxPathLength, final int reachRange, final float maxVisitedNodesMultiplier // Paper - optimize collection
+     ) {
+diff --git a/net/minecraft/world/level/pathfinder/PathTypeCache.java b/net/minecraft/world/level/pathfinder/PathTypeCache.java
+index 1a50ec0d56bb4b9c3b0958a0281028c8eff1000c..15f32bdaafb0fa24c052bfe0a40a4b0a031947c3 100644
+--- a/net/minecraft/world/level/pathfinder/PathTypeCache.java
++++ b/net/minecraft/world/level/pathfinder/PathTypeCache.java
+@@ -8,8 +8,14 @@ import org.jspecify.annotations.Nullable;
+ public class PathTypeCache {
+     private static final int SIZE = 4096;
+     private static final int MASK = 4095;
+-    private final long[] positions = new long[4096];
+-    private final PathType[] pathTypes = new PathType[4096];
++    // Swift start - thread-safe: one immutable entry per slot, so a reader never pairs a key with another key's type
++    // (parallel entity ticking and async pathfinding share this cache between threads; the two parallel arrays
++    // could be read half-updated). Same hits and misses as the two arrays when used from one thread.
++    private record Entry(long key, PathType type) {
++    }
++
++    private final Entry[] entries = new Entry[4096];
++    // Swift end
+ 
+     public PathType getOrCompute(final BlockGetter level, final BlockPos pos) {
+         long key = pos.asLong();
+@@ -19,21 +25,22 @@ public class PathTypeCache {
+     }
+ 
+     private @Nullable PathType get(final int index, final long key) {
+-        return this.positions[index] == key ? this.pathTypes[index] : null;
++        final Entry entry = this.entries[index]; // Swift
++        return entry != null && entry.key == key ? entry.type : null; // Swift
+     }
+ 
+     private PathType compute(final BlockGetter level, final BlockPos pos, final int index, final long key) {
+         PathType pathType = WalkNodeEvaluator.getPathTypeFromState(level, pos);
+-        this.positions[index] = key;
+-        this.pathTypes[index] = pathType;
++        this.entries[index] = new Entry(key, pathType); // Swift
+         return pathType;
+     }
+ 
+     public void invalidate(final BlockPos pos) {
+         long key = pos.asLong();
+         int index = index(key);
+-        if (this.positions[index] == key) {
+-            this.pathTypes[index] = null;
++        final Entry entry = this.entries[index]; // Swift
++        if (entry != null && entry.key == key) { // Swift
++            this.entries[index] = null; // Swift
+         }
+     }
+ 
+diff --git a/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java b/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java
+index 7beeebdf6ddef8114ff8f56f438776c4daf1aa3e..eda9ec9dd0097313b9c2beef347c73598ecd7d89 100644
+--- a/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java
++++ b/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java
+@@ -33,11 +33,35 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+     private final Long2ObjectMap<PathType> pathTypesByPosCacheByMob = new Long2ObjectOpenHashMap<>();
+     private final Object2BooleanMap<AABB> collisionCache = new Object2BooleanOpenHashMap<>();
+     private final Node[] reusableNeighbors = new Node[Direction.Plane.HORIZONTAL.length()];
++    // Swift start - async pathfinding: the mob state the neighbour search reads, taken in prepare(). The search
++    // may run on another thread while the mob moves on; synchronously these are exactly the live values (the mob
++    // cannot change during a search).
++    private double swift$x;
++    private double swift$y;
++    private double swift$z;
++    private BlockPos swift$blockPos;
++    private AABB swift$bb;
++    private float swift$maxUpStep;
++    private int swift$maxFallDistance;
++    private float swift$bbWidth;
++    private float swift$bbHeight;
++    // Swift end
+ 
+     @Override
+     public void prepare(final PathNavigationRegion level, final Mob entity) {
+         super.prepare(level, entity);
+         entity.onPathfindingStart();
++        // Swift start - async pathfinding: mob state for the search
++        this.swift$x = entity.getX();
++        this.swift$y = entity.getY();
++        this.swift$z = entity.getZ();
++        this.swift$blockPos = entity.blockPosition();
++        this.swift$bb = entity.getBoundingBox();
++        this.swift$maxUpStep = entity.maxUpStep();
++        this.swift$maxFallDistance = entity.getMaxFallDistance();
++        this.swift$bbWidth = entity.getBbWidth();
++        this.swift$bbHeight = entity.getBbHeight();
++        // Swift end
+     }
+ 
+     @Override
+@@ -120,7 +144,7 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+         PathType blockPathTypeAbove = this.getCachedPathType(pos.x, pos.y + 1, pos.z);
+         PathType blockPathTypeCurrent = this.getCachedPathType(pos.x, pos.y, pos.z);
+         if (this.mob.getPathfindingMalus(blockPathTypeAbove) >= 0.0F && blockPathTypeCurrent != PathType.STICKY_HONEY) {
+-            jumpSize = Mth.floor(Math.max(1.0F, this.mob.maxUpStep()));
++            jumpSize = Mth.floor(Math.max(1.0F, this.swift$maxUpStep)); // Swift
+         }
+ 
+         double posHeight = this.getFloorLevel(new BlockPos(pos.x, pos.y, pos.z));
+@@ -166,8 +190,8 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+         }
+ 
+         if (ew.type != PathType.WALKABLE_DOOR && ns.type != PathType.WALKABLE_DOOR) {
+-            if (!(this.mob.getBbWidth() > 1.0F) || !(ew.costMalus > 0.0F) && !(ns.costMalus > 0.0F)) {
+-                boolean canPassBetweenPosts = ns.type == PathType.FENCE && ew.type == PathType.FENCE && this.mob.getBbWidth() < 0.5;
++            if (!(this.swift$bbWidth > 1.0F) || !(ew.costMalus > 0.0F) && !(ns.costMalus > 0.0F)) { // Swift
++                boolean canPassBetweenPosts = ns.type == PathType.FENCE && ew.type == PathType.FENCE && this.swift$bbWidth < 0.5; // Swift
+                 return (ns.y < pos.y || ns.costMalus >= 0.0F || canPassBetweenPosts) && (ew.y < pos.y || ew.costMalus >= 0.0F || canPassBetweenPosts);
+             } else {
+                 return false;
+@@ -186,9 +210,9 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+     }
+ 
+     private boolean canReachWithoutCollision(final Node posTo) {
+-        AABB bb = this.mob.getBoundingBox();
++        AABB bb = this.swift$bb; // Swift
+         Vec3 delta = new Vec3(
+-            posTo.x - this.mob.getX() + bb.getXsize() / 2.0, posTo.y - this.mob.getY() + bb.getYsize() / 2.0, posTo.z - this.mob.getZ() + bb.getZsize() / 2.0
++            posTo.x - this.swift$x + bb.getXsize() / 2.0, posTo.y - this.swift$y + bb.getYsize() / 2.0, posTo.z - this.swift$z + bb.getZsize() / 2.0 // Swift
+         );
+         int steps = Mth.ceil(delta.length() / bb.getSize());
+         delta = delta.scale(1.0F / steps);
+@@ -269,7 +293,7 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+     }
+ 
+     private double getMobJumpHeight() {
+-        return Math.max(1.125, this.mob.maxUpStep());
++        return Math.max(1.125, this.swift$maxUpStep); // Swift
+     }
+ 
+     private Node getNodeAndUpdateCostToMax(final int x, final int y, final int z, final PathType pathType, final float cost) {
+@@ -309,7 +333,7 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+             return null;
+         }
+ 
+-        if (this.mob.getBbWidth() >= 1.0F) {
++        if (this.swift$bbWidth >= 1.0F) { // Swift
+             return nodeAbove;
+         }
+ 
+@@ -319,13 +343,13 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+ 
+         double centerX = x - travelDirection.getStepX() + 0.5;
+         double centerZ = z - travelDirection.getStepZ() + 0.5;
+-        double halfWidth = this.mob.getBbWidth() / 2.0;
++        double halfWidth = this.swift$bbWidth / 2.0; // Swift
+         AABB grow = new AABB(
+             centerX - halfWidth,
+             this.getFloorLevel(reusablePos.set(centerX, y + 1, centerZ)) + 0.001,
+             centerZ - halfWidth,
+             centerX + halfWidth,
+-            this.mob.getBbHeight() + this.getFloorLevel(reusablePos.set((double)nodeAbove.x, (double)nodeAbove.y, (double)nodeAbove.z)) - 0.002,
++            this.swift$bbHeight + this.getFloorLevel(reusablePos.set((double)nodeAbove.x, (double)nodeAbove.y, (double)nodeAbove.z)) - 0.002, // Swift
+             centerZ + halfWidth
+         );
+         return this.hasCollisions(grow) ? null : nodeAbove;
+@@ -349,7 +373,7 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+ 
+     private Node tryFindFirstGroundNodeBelow(final int x, final int y, final int z) {
+         for (int currentY = y - 1; currentY >= this.mob.level().getMinY(); currentY--) {
+-            if (y - currentY > this.mob.getMaxFallDistance()) {
++            if (y - currentY > this.swift$maxFallDistance) { // Swift
+                 return this.getBlockedNode(x, currentY, z);
+             }
+ 
+@@ -428,7 +452,7 @@ public class WalkNodeEvaluator extends NodeEvaluator {
+                     int yy = dy + y;
+                     int zz = dz + z;
+                     PathType blockType = this.getPathType(context, xx, yy, zz);
+-                    BlockPos mobPosition = this.mob.blockPosition();
++                    BlockPos mobPosition = this.swift$blockPos; // Swift
+                     boolean canPassDoors = this.canPassDoors();
+                     if (blockType == PathType.DOOR_WOOD_CLOSED && this.canOpenDoors() && canPassDoors) {
+                         blockType = PathType.WALKABLE_DOOR;

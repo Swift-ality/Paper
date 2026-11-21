@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:path_zombie_hunts_through_maze",
+  "environment": "swift:default",
+  "structure": "swift:arena",
+  "max_ticks": 600,
+  "setup_ticks": 0,
+  "required": true
+}

@@ -28,14 +28,19 @@ const MODES = {
   paper: [],
   fork: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true'],
   nodefer: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.asyncEntities.deferPushes=false'],
-  nolos: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.nearestFirstLineOfSight=false']
+  nolos: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.nearestFirstLineOfSight=false'],
+  // async pathfinding (opt-in) on top of 'swift' (serial ticking) and on top of 'fork'
+  asyncpath: ['-Dswift.asyncEntities=false', '-Dswift.asyncPathfinding=true'],
+  forkpath: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.asyncPathfinding=true']
 }
 const JARS = { paper: 'paper-upstream.jar' }
 const WARMUP_S = Number(process.env.WARMUP_S || 45)
 const MEASURE_S = 60
 // SCENARIO=farm (default): 400 villagers + 1000 animals at noon; SCENARIO=zombies: 3000 zombies at midnight;
 // SCENARIO=huge: 10000 zombies + 10000 villagers at midnight, 61x61 pen split by a glass wall (zombies see the
-// villagers and keep trying to reach them, but cannot, so the count stays stable)
+// villagers and keep trying to reach them, but cannot, so the count stays stable); SCENARIO=chase: 1500 zombies
+// hunting 300 invulnerable villagers through a 61x61 maze of glass walls (pathfinding-heavy: long paths,
+// targets that keep moving)
 const SCENARIO = process.env.SCENARIO || 'farm'
 
 function prepare () {
@@ -133,7 +138,7 @@ async function runMode (mode) {
   await command(proc, 'tp Bench 0 -50 0')
   // dense: 2000 villagers in a 19x19 pen, the same ~5.5 per block as the villager half of 'huge', but light
   // enough that every server holds 20 TPS, so each runs the same number of ticks (fair for counting deaths)
-  const R = SCENARIO === 'huge' ? 30 : SCENARIO === 'dense' ? 9 : 22
+  const R = SCENARIO === 'huge' || SCENARIO === 'chase' ? 30 : SCENARIO === 'dense' ? 9 : 22
   for (let y = -60; y <= -58; y++) {
     await command(proc, `fill ${-R - 1} ${y} ${-R - 1} ${R + 1} ${y} ${-R - 1} glass`, 50)
     await command(proc, `fill ${-R - 1} ${y} ${R + 1} ${R + 1} ${y} ${R + 1} glass`, 50)
@@ -143,7 +148,15 @@ async function runMode (mode) {
   if (SCENARIO === 'huge') {
     for (let y = -60; y <= -57; y++) await command(proc, `fill 0 ${y} ${-R} 0 ${y} ${R} glass`, 50)
   }
-  const plan = SCENARIO === 'zombies' ? [['zombie', 3000]]
+  if (SCENARIO === 'chase') {
+    // east-west walls every 6 blocks, each open at alternating ends: the way from one row to the next winds
+    for (let z = -R + 6, k = 0; z < R; z += 6, k++) {
+      const [x0, x1] = k % 2 ? [-R + 3, R] : [-R, R - 3]
+      for (let y = -60; y <= -58; y++) await command(proc, `fill ${x0} ${y} ${z} ${x1} ${y} ${z} glass`, 50)
+    }
+  }
+  const plan = SCENARIO === 'chase' ? [['zombie', 1500], ['villager', 300]]
+    : SCENARIO === 'zombies' ? [['zombie', 3000]]
     : SCENARIO === 'huge' ? [['zombie', 10000], ['villager', 10000]]
     : SCENARIO === 'dense' ? [['villager', 2000]]
     : [['villager', 400], ['cow', 300], ['sheep', 300], ['pig', 200], ['chicken', 200]]
@@ -158,6 +171,8 @@ async function runMode (mode) {
     }
   }
   await sleep(1000)
+  // the hunted villagers must survive the whole window (Invulnerable does not stop mob damage on this version)
+  if (SCENARIO === 'chase') await command(proc, 'effect give @e[type=villager] minecraft:resistance infinite 255 true', 500)
   const entities = (await command(proc, 'execute if entity @e[type=!player]', 0, COUNT)).find(l => COUNT.test(l)) || ''
   console.log(`[${mode}] ${n} mobs summoned (${entities.trim()}); warming up ${WARMUP_S}s`)
   await sleep(WARMUP_S * 1000)

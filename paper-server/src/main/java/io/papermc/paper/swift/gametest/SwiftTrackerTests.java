@@ -148,6 +148,7 @@ final class SwiftTrackerTests {
                         + missing(mobs, m -> addedB.contains(m.getId()), "cows without a spawn packet to B");
                     if (last[0].isEmpty()) {
                         stage[0] = 1;
+                        LOG.info("[SwiftGameTests] tracker pairs/unpairs: stage 0 done on tick {}", helper.getTick());
                         b.player().teleportTo(b.player().getX() + 3000, b.player().getY(), b.player().getZ());
                     }
                 }
@@ -158,6 +159,7 @@ final class SwiftTrackerTests {
                         + missing(mobs, m -> tracks(m, a.player()), "cows A lost while B was away");
                     if (last[0].isEmpty()) {
                         stage[0] = 2;
+                        LOG.info("[SwiftGameTests] tracker pairs/unpairs: stage 1 done on tick {}", helper.getTick());
                         b.player().teleportTo(b.player().getX() - 3000, b.player().getY(), b.player().getZ());
                     }
                 }
@@ -167,6 +169,7 @@ final class SwiftTrackerTests {
                         + missing(mobs, m -> readdedB.contains(m.getId()), "cows without a new spawn packet to B");
                     if (last[0].isEmpty()) {
                         stage[0] = 3;
+                        LOG.info("[SwiftGameTests] tracker pairs/unpairs: stage 2 done on tick {}", helper.getTick());
                     }
                 }
                 default -> {

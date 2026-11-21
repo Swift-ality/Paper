@@ -33,6 +33,7 @@ exception to the "same gameplay" rule and is off by default (see its section).
 | 0048 | Parallel ticking: entity pushes, cramming and entity searches behave like serial ticking | part of `swift.asyncEntities` |
 | 0049 | Nearest-target searches trace line of sight nearest-first | `swift.nearestFirstLineOfSight` |
 | 0050 | Brain sensors sort nearby entities on plain numbers (same order) | `swift.sensorSort` |
+| 0051 | Ground mobs search paths on pathfinding threads (**mobs react one tick later**) | off unless `swift.asyncPathfinding=true` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -374,6 +375,67 @@ valid while other threads move entities, so the separate parallel-ticking sort f
 so many share a spot or a distance: 5,760 sorts with 10,381 equal-distance neighbours, same order as the
 comparator sort), `sort_sensor_memory_nearest_first` (a real villager's sensor memory is nearest first).
 `-Dswift.verify=true` also sorts the vanilla way on every sensor tick and reports any difference.
+
+---
+## 0051: async pathfinding (`swift-invasive`, off by default)
+
+**Like 0045, this changes timing**, so it is off unless `async-pathfinding.enabled: true` in swift.yml
+(`-Dswift.asyncPathfinding=true`). Threads: `async-pathfinding.threads` (default 2).
+
+**Before:** every path search (A* over the blocks around the mob) runs on the main thread inside the mob's
+tick. Where mobs chase something (1500 zombies hunting 300 villagers through a maze, `SCENARIO=chase`) that
+was 22% of the main thread (3.4 of 15.3 ms/tick).
+
+**Now:** for ground mobs (plain `GroundPathNavigation` + `WalkNodeEvaluator`: zombies, skeletons, villagers,
+animals, golems ...), `createPath` does everything up to the search on the main thread as before (checks,
+`EntityPathfindEvent`, the region snapshot), plus the part that reads the mob: the start node, the targets,
+and a snapshot of the mob values the search uses (position, bounding box, step height, fall distance). The
+search itself runs on a pathfinding thread and `createPath` returns a *pending* path.
+
+- **When the path is applied:** at the start of the mob's next AI step, everything that requested a path
+  gets it, and what `createPath`/`moveTo` would have done with the result happens then. Until then the
+  navigation treats the path as "not done, nothing to follow yet". So the mob starts walking one tick later.
+- **Code that reads the path straight away** gets the real result: the path waits for the search, or runs
+  it on its own thread if no pathfinding thread has started it. The result never depends on thread timing,
+  and a pool that falls behind only means the main thread runs the searches itself.
+- **Villagers' walking** (`MoveToTargetSink`) looks at "can reach" straight away. With a pending path it now
+  starts walking, and updates the "can't reach since" memory (or takes vanilla's partial step towards the
+  target) when the path is applied.
+- **Block changes on a pending path** are kept, and checked against the path when it is applied, as vanilla
+  does on a block update.
+- **Plugin API** (`Pathfinder.findPath`): still answers synchronously.
+
+**What can differ from vanilla:**
+- Mobs react one tick later.
+- The search reads the world during the rest of that tick, so a block changed in that window may or may not
+  be seen.
+- A request that finds no path looks like a success for that one tick (`moveTo` returns true, a goal may
+  start), and becomes "no path" when applied.
+
+**Not affected:** spiders, swimmers, flyers, amphibians and the sniffer keep the synchronous search. With
+parallel entity ticking (0045) on, the searches already run on the entity worker threads and stay
+synchronous, so this switch then makes no difference.
+
+**Also fixed (affects 0045 too):** the shared path-type cache (`PathTypeCache`) stored keys and types in two
+arrays, so another thread could read a new key with an old type. It now stores one immutable entry per slot.
+Same hits and misses on one thread.
+
+**Gain:** 64 zombies requesting paths across an obstacle arena: 9-10x less main-thread time per request
+(`bench_async_pathfinding`). Chase scenario (serial ticking): 14.1 -> 11.6 ms/tick (-18%,
+`SCENARIO=chase perf-bench.mjs swift asyncpath`). With parallel ticking on it makes no difference (3.9 vs 4.2 ms, noise).
+
+**Tests:**
+- `path_async_differential`: 30 random obstacle layouts with doors, fences, walls, water, slabs, trapdoors,
+  rails, honey, powder snow, magma, cobwebs, berry bushes, cauldrons and leaves. Zombies, a baby zombie,
+  villagers, iron golems (two-wide search), cows, chickens, skeletons and pigs request paths to a block, to
+  the nearest of three blocks, and to an entity. Result: 1440 requests, all searched on the pool, every
+  async path identical to the synchronous one, node for node.
+- `path_pending_semantics`: covers moveTo with a pending path, reuse for the same target, nothing applied
+  in the requesting tick, the applied path equal to the synchronous one, two equal requests, a boxed-in
+  mob, and a wall built on the pending path.
+- End to end: `path_zombie_hunts_through_maze` and `path_villager_walks_to_target` (walking around a wall,
+  and a boxed villager recording "can't reach").
+- The whole suite also runs with async pathfinding on, alone and with parallel ticking.
 
 ---
 

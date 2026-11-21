@@ -50,6 +50,11 @@ public final class SwiftTestFunctions implements TestFunctionLoader {
         register.accept(key("poi_locked_villager_takes_job_placed_later"), SwiftPoiTests::lockedVillagerTakesJobPlacedLater);
         register.accept(key("poi_villager_claims_bed_freed_later"), SwiftPoiTests::claimsBedFreedLater);
         register.accept(key("brain_villager_sleeps_at_night"), SwiftBrainTests::villagerSleepsAtNight);
+        register.accept(key("path_async_differential"), SwiftPathfindingTests::differential);
+        register.accept(key("path_pending_semantics"), SwiftPathfindingTests::pendingPathSemantics);
+        register.accept(key("path_zombie_hunts_through_maze"), SwiftPathfindingTests::zombieHuntsThroughMaze);
+        register.accept(key("path_villager_walks_to_target"), SwiftPathfindingTests::villagerWalksToTarget);
+        register.accept(key("bench_async_pathfinding"), SwiftPathfindingTests::bench);
         register.accept(key("brain_piglin_admires_gold"), SwiftBrainTests::piglinAdmiresGold);
         register.accept(key("brain_all_types"), SwiftBrainLoopTests::allBrainTypes);
         register.accept(key("bench_brain_loop"), SwiftBrainLoopTests::bench);

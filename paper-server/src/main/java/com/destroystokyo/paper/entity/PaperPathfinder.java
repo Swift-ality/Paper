@@ -53,6 +53,7 @@ public class PaperPathfinder implements com.destroystokyo.paper.entity.Pathfinde
         Preconditions.checkArgument(loc != null, "Location can not be null");
         Preconditions.checkArgument(reachRange >= 0, "Reach range can not be negative");
         Path path = this.entity.getNavigation().createPath(loc.getX(), loc.getY(), loc.getZ(), reachRange);
+        if (path != null) path = path.swift$orNull(); // Swift - async pathfinding: the API answers synchronously
         return path != null ? new PaperPathResult(path) : null;
     }
 
@@ -62,6 +63,7 @@ public class PaperPathfinder implements com.destroystokyo.paper.entity.Pathfinde
         Preconditions.checkArgument(target != null, "Target can not be null");
         Preconditions.checkArgument(reachRange >= 0, "Reach range can not be negative");
         Path path = this.entity.getNavigation().createPath(((CraftEntity) target).getHandle(), reachRange);
+        if (path != null) path = path.swift$orNull(); // Swift - async pathfinding: the API answers synchronously
         return path != null ? new PaperPathResult(path) : null;
     }
 
@@ -125,6 +127,7 @@ public class PaperPathfinder implements com.destroystokyo.paper.entity.Pathfinde
         @Override
         public List<Location> getPoints() {
             List<Location> points = new ArrayList<>();
+            this.path.swift$resolve(); // Swift - async pathfinding
             for (Node point : this.path.nodes) {
                 points.add(CraftLocation.toBukkit(point, PaperPathfinder.this.entity.level()));
             }

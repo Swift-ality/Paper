@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:bench_async_pathfinding",
+  "environment": "swift:default",
+  "structure": "swift:arena",
+  "max_ticks": 300,
+  "setup_ticks": 0,
+  "required": false
+}

@@ -60,6 +60,13 @@ public final class SwiftConfig {
                 "(patch 0046). Packets only: gameplay is unchanged. Uses the same threads as parallel-entity-ticking.")),
         new Option("parallel-entity-tracker.min-parallel", "swift.asyncTracker.minParallel", 64,
             List.of("A world tracking fewer entities than this runs the tracker serially.")),
+        // async pathfinding
+        new Option("async-pathfinding.enabled", "swift.asyncPathfinding", false,
+            List.of("Ground mobs search their paths on pathfinding threads instead of the main thread (patch 0051).",
+                "CHANGES TIMING: a mob starts following a new path one tick later, and the search may or may not",
+                "see a block changed during the rest of that tick.")),
+        new Option("async-pathfinding.threads", "swift.asyncPathfinding.threads", 2,
+            List.of("Pathfinding threads. If they fall behind, the main thread runs the waiting searches itself.")),
         // debugging
         new Option("debug.shadow-verify", "swift.verify", false,
             List.of("Run the original code next to each optimisation and log any difference. Slow; for testing."))
