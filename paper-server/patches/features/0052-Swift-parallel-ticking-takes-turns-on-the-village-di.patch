@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 18:49:47 +0100
+Subject: [PATCH] Swift: parallel ticking takes turns on the village distance
+ tracker
+
+
+diff --git a/net/minecraft/world/entity/ai/village/poi/PoiManager.java b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+index e53f7d0c5d071e819641cd3ac22e5c5676587432..5e2bdf08c8170aedddba666eb83f2eda33d68fbd 100644
+--- a/net/minecraft/world/entity/ai/village/poi/PoiManager.java
++++ b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+@@ -60,11 +60,14 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+     }
+ 
+     private void updateDistanceTracking(long section) {
+-        if (this.isVillageCenter(section)) {
++        final boolean villageCenter = this.isVillageCenter(section); // Swift - async entities: read outside the lock
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock(); try { // Swift - async entities: the tracker is not thread-safe
++        if (villageCenter) { // Swift
+             this.villageDistanceTracker.setSource(section, POI_DATA_SOURCE);
+         } else {
+             this.villageDistanceTracker.removeSource(section);
+         }
++        } finally { io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held); } // Swift - async entities
+     }
+ 
+     @Override
+@@ -425,8 +428,16 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+ 
+     public int sectionsToVillage(final SectionPos sectionPos) {
+         // Paper start - rewrite chunk system
++        // Swift start - async entities: a query first works through pending updates (writing the tracker's
++        // queues), so parallel queries must take turns; the answer does not depend on who propagates
++        final boolean swift$held = io.papermc.paper.swift.async.SwiftAsync.lock();
++        try {
+         this.villageDistanceTracker.propagateUpdates();
+         return convertBetweenLevels(this.villageDistanceTracker.getLevel(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionKey(sectionPos)));
++        } finally {
++            io.papermc.paper.swift.async.SwiftAsync.unlock(swift$held);
++        }
++        // Swift end
+         // Paper end - rewrite chunk system
+     }
+ 

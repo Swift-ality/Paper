@@ -34,6 +34,7 @@ exception to the "same gameplay" rule and is off by default (see its section).
 | 0049 | Nearest-target searches trace line of sight nearest-first | `swift.nearestFirstLineOfSight` |
 | 0050 | Brain sensors sort nearby entities on plain numbers (same order) | `swift.sensorSort` |
 | 0051 | Ground mobs search paths on pathfinding threads (**mobs react one tick later**) | off unless `swift.asyncPathfinding=true` |
+| 0052 | Parallel ticking: village-distance queries take turns (fixes a crash in the tracker's queue) | part of `swift.asyncEntities` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -436,6 +437,28 @@ Same hits and misses on one thread.
 - End to end: `path_zombie_hunts_through_maze` and `path_villager_walks_to_target` (walking around a wall,
   and a boxed villager recording "can't reach").
 - The whole suite also runs with async pathfinding on, alone and with parallel ticking.
+
+---
+## 0052: parallel ticking takes turns on the village distance tracker (`swift-invasive`)
+
+**The bug (0045, parallel ticking only):** "how close is this to a village" (`ServerLevel#isCloseToVillage`:
+zombies' `MoveThroughVillageGoal`, raids, cats, iron golem spawning ...) is answered by Moonrise's village
+distance tracker in `PoiManager`. Every query first works through the tracker's pending updates, which
+writes its internal queues. With parallel ticking, zombies on different worker threads asked at the same
+time and corrupted those queues: `ArrayIndexOutOfBoundsException` in
+`Delayed8WayDistancePropagator2D$NoResizeByteArrayFIFODeque.removeFirstByte`, and the zombie was removed
+by Paper's entity-crash guard. Found by looping the full suite with parallel ticking (run 66 of 66). It was
+the cause of the earlier unexplained `async_mob_crowd` failure ("1 entity ticks threw").
+
+**Fix:** queries and source updates take the parallel-ticking lock (`SwiftAsync.lock`, a no-op outside the
+parallel phase). The answer does not depend on which thread does the pending work, so gameplay is
+unchanged.
+
+**Test:** `async_village_distance_parallel_queries`: 300 rounds of village sources added and removed on the
+main thread, then 600 distance queries at once on the worker threads (180,000 in all). Before the fix it
+failed on the first run, and the corrupted tracker even broke the single-thread check afterwards. After the
+fix nothing throws, and every parallel answer equals a single-thread query. The test runs on the worker
+threads whatever the suite setting.
 
 ---
 

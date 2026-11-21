@@ -215,6 +215,87 @@ final class SwiftAsyncTests {
     }
 
     /**
+     * The village distance tracker (zombies' {@code MoveThroughVillageGoal}, raids, cats ... ask
+     * {@code ServerLevel#isCloseToVillage}) works through its pending updates on every query, writing its own
+     * queues. 300 rounds: village sources are added and removed on the main thread (as POI changes do), then the
+     * worker threads ask for 600 distances at once. No query may throw, and every answer must equal the one a
+     * single thread gets afterwards. (Found by the full suite: an ArrayIndexOutOfBoundsException in the tracker's
+     * queue under parallel ticking.) Runs on the worker threads whatever the suite setting. Uses sections far
+     * from every test, and removes its sources again.
+     */
+    static void villageDistanceParallelQueries(final GameTestHelper helper) {
+        final ServerLevel level = helper.getLevel();
+        final net.minecraft.world.entity.ai.village.poi.PoiManager poi = level.getPoiManager();
+        helper.runAfterDelay(1, () -> {
+            final StringBuilder p = new StringBuilder();
+            try {
+                final java.lang.reflect.Field field = net.minecraft.world.entity.ai.village.poi.PoiManager.class.getDeclaredField("villageDistanceTracker");
+                field.setAccessible(true);
+                final ca.spottedleaf.moonrise.common.misc.Delayed26WayDistancePropagator3D tracker =
+                    (ca.spottedleaf.moonrise.common.misc.Delayed26WayDistancePropagator3D) field.get(poi);
+                final java.util.Random random = new java.util.Random(0x7111L);
+                final List<Long> sources = new ArrayList<>();
+                final java.util.concurrent.atomic.AtomicInteger thrown = new java.util.concurrent.atomic.AtomicInteger();
+                final java.util.concurrent.atomic.AtomicReference<Throwable> first = new java.util.concurrent.atomic.AtomicReference<>();
+                int mismatches = 0;
+                for (int round = 0; round < 300; round++) {
+                    for (int k = 0; k < 6; k++) {
+                        if (!sources.isEmpty() && random.nextInt(3) == 0) {
+                            tracker.removeSource(sources.remove(random.nextInt(sources.size())));
+                        } else {
+                            final long key = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionKey(
+                                40_000 + random.nextInt(24), random.nextInt(4), 40_000 + random.nextInt(24));
+                            tracker.setSource(key, 7);
+                            sources.add(key);
+                        }
+                    }
+                    final List<net.minecraft.core.SectionPos> queries = new ArrayList<>();
+                    for (int q = 0; q < 600; q++) {
+                        queries.add(net.minecraft.core.SectionPos.of(40_000 - 4 + random.nextInt(32), random.nextInt(4), 40_000 - 4 + random.nextInt(32)));
+                    }
+                    final int[] answers = new int[queries.size()];
+                    final List<Integer> indices = new ArrayList<>();
+                    for (int i = 0; i < queries.size(); i++) {
+                        indices.add(i);
+                    }
+                    SwiftAsync.forEachParallel(indices, i -> {
+                        try {
+                            answers[i] = poi.sectionsToVillage(queries.get(i));
+                        } catch (final Throwable t) {
+                            thrown.incrementAndGet();
+                            first.compareAndSet(null, t);
+                            answers[i] = Integer.MIN_VALUE;
+                        }
+                    });
+                    for (int i = 0; i < queries.size(); i++) {
+                        if (answers[i] != poi.sectionsToVillage(queries.get(i))) {
+                            mismatches++;
+                        }
+                    }
+                }
+                for (final long key : sources) {
+                    tracker.removeSource(key);
+                }
+                tracker.propagateUpdates();
+                LOG.info("[SwiftGameTests] village distance: 180000 parallel queries, {} threw, {} answers differ from a serial query", thrown.get(), mismatches);
+                if (thrown.get() != 0) {
+                    p.append("\n  ").append(thrown.get()).append(" parallel queries threw, first: ").append(first.get());
+                }
+                if (mismatches != 0) {
+                    p.append("\n  ").append(mismatches).append(" parallel answers differ from a serial query");
+                }
+            } catch (final ReflectiveOperationException e) {
+                p.append("\n  ").append(e);
+            }
+            if (!p.isEmpty()) {
+                helper.fail(Component.literal(p.toString()));
+            } else {
+                helper.succeed();
+            }
+        });
+    }
+
+    /**
      * 16 cows (goal-based breeding) and 16 goats (brain-based breeding), all in love. Once nobody is in love
      * any more, every breeding made one baby, or two: vanilla itself sometimes gives twins, because a goal
      * only re-checks its partner every other tick, so both parents can breed. So babies lie between half the
