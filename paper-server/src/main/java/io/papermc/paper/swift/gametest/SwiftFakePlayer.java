@@ -40,6 +40,39 @@ public final class SwiftFakePlayer {
     /** Per test: tests in a batch run side by side, so cleanup must only touch the calling test's players. */
     private static final java.util.Map<GameTestHelper, List<SwiftFakePlayer>> ONLINE = new java.util.IdentityHashMap<>();
 
+    /**
+     * An EmbeddedChannel runs every write on the calling thread (its event loop says "in event loop" to everyone),
+     * and its buffers are not thread-safe. A real channel hands writes from other threads to its event loop. Some
+     * packets are sent immediately from whatever thread produces them (sounds, particles, chat: see
+     * {@code Connection.InnerUtil#canSendImmediate}), so with parallel entity ticking a worker thread can write
+     * while the main thread flushes tracker packets. Those writes are serialised here, as the event loop would.
+     */
+    private static final class SerialWrites extends io.netty.channel.ChannelOutboundHandlerAdapter {
+        @Override
+        public void write(final io.netty.channel.ChannelHandlerContext ctx, final Object msg, final io.netty.channel.ChannelPromise promise) {
+            if (!io.papermc.paper.util.MCUtil.isMainThread()) {
+                final long n = OFF_MAIN_WRITES.incrementAndGet();
+                if (n <= 3) {
+                    org.slf4j.LoggerFactory.getLogger("SwiftGameTests").info("[SwiftGameTests] fake player channel: write from {} ({})",
+                        Thread.currentThread().getName(), msg.getClass().getSimpleName());
+                }
+            }
+            synchronized (ctx.channel()) {
+                ctx.write(msg, promise);
+            }
+        }
+
+        @Override
+        public void flush(final io.netty.channel.ChannelHandlerContext ctx) {
+            synchronized (ctx.channel()) {
+                ctx.flush();
+            }
+        }
+    }
+
+    /** Writes into fake player channels from threads other than the main thread (see {@link SerialWrites}). */
+    public static final java.util.concurrent.atomic.AtomicLong OFF_MAIN_WRITES = new java.util.concurrent.atomic.AtomicLong();
+
     private final ServerPlayer player;
     private final EmbeddedChannel channel;
     private final GameTestHelper owner;
@@ -66,7 +99,7 @@ public final class SwiftFakePlayer {
         final CommonListenerCookie cookie = CommonListenerCookie.createInitial(profile, false);
         final ServerPlayer player = new ServerPlayer(server, helper.getLevel(), cookie.gameProfile(), ClientInformation.createDefault());
         final Connection connection = new Connection(PacketFlow.SERVERBOUND);
-        final EmbeddedChannel channel = new EmbeddedChannel(connection);
+        final EmbeddedChannel channel = new EmbeddedChannel(new SerialWrites(), connection);
         server.getPlayerList().placeNewPlayer(connection, player, cookie);
         // a real connection is marked not-pending by ServerConnectionListener once it is live; a pending
         // connection sends every packet at once from whatever thread asks, which real players never do
@@ -76,7 +109,9 @@ public final class SwiftFakePlayer {
         player.teleportTo(at.getX() + 0.5, at.getY(), at.getZ() + 0.5);
         final SwiftFakePlayer fake = new SwiftFakePlayer(player, channel, helper);
         ONLINE.computeIfAbsent(helper, k -> new ArrayList<>()).add(fake);
-        channel.outboundMessages().clear();
+        synchronized (channel) {
+            channel.outboundMessages().clear();
+        }
         return fake;
     }
 
@@ -95,13 +130,16 @@ public final class SwiftFakePlayer {
 
     /** Delivers any serverbound packet through the connection, as if the client had sent it. */
     public void receive(final Packet<?> packet) {
-        this.channel.writeInbound(packet);
-        this.channel.runPendingTasks();
+        synchronized (this.channel) {
+            this.channel.writeInbound(packet);
+            this.channel.runPendingTasks();
+        }
     }
 
     /** Plain text of the system chat messages the server has sent this player since the last call. */
     public List<String> drainChat() {
         final List<String> out = new ArrayList<>();
+        synchronized (this.channel) {
         Object msg;
         while ((msg = this.channel.readOutbound()) != null) {
             if (msg instanceof ClientboundSystemChatPacket chat) {
@@ -113,6 +151,7 @@ public final class SwiftFakePlayer {
                     }
                 }
             }
+        }
         }
         return out;
     }
@@ -129,8 +168,9 @@ public final class SwiftFakePlayer {
         } catch (final ReflectiveOperationException e) {
             throw new RuntimeException(e);
         }
-        this.channel.runPendingTasks();
         final List<Packet<?>> out = new ArrayList<>();
+        synchronized (this.channel) {
+        this.channel.runPendingTasks();
         Object msg;
         while ((msg = this.channel.readOutbound()) != null) {
             if (msg instanceof net.minecraft.network.protocol.BundlePacket<?> bundle) {
@@ -140,6 +180,7 @@ public final class SwiftFakePlayer {
             } else if (msg instanceof Packet<?> packet) {
                 out.add(packet);
             }
+        }
         }
         return out;
     }

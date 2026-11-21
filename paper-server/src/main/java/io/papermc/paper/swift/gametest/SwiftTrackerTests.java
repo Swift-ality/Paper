@@ -60,6 +60,16 @@ final class SwiftTrackerTests {
         return tracker != null && tracker.seenBy.contains(player.connection);
     }
 
+    private static String queued(final ServerPlayer player) {
+        try {
+            final var field = net.minecraft.network.Connection.class.getDeclaredField("pendingActions");
+            field.setAccessible(true);
+            return ((java.util.Collection<?>) field.get(player.connection.connection)).size() + " waiting";
+        } catch (final ReflectiveOperationException e) {
+            return e.toString();
+        }
+    }
+
     private static int entityId(final Packet<?> packet) {
         if (packet instanceof ClientboundAddEntityPacket add) {
             return add.getId();
@@ -133,12 +143,30 @@ final class SwiftTrackerTests {
         final Set<Integer> readdedB = new HashSet<>();
         final int[] stage = {0};
         final String[] last = {""};
+        // diagnostics: what B received per cow (stage:tick:packet), to explain a missing packet
+        final java.util.Map<Integer, List<String>> seenByB = new java.util.HashMap<>();
         helper.onEachTick(() -> {
             if (stage[0] == 3) {
                 return;
             }
             addedA.addAll(idsOf(a.drainPackets(), ClientboundAddEntityPacket.class));
             final List<Packet<?>> packetsB = b.drainPackets();
+            for (final Packet<?> packet : packetsB) {
+                final List<Integer> ids = new ArrayList<>();
+                if (packet instanceof ClientboundRemoveEntitiesPacket remove) {
+                    remove.entityIds().forEach(ids::add);
+                } else {
+                    ids.add(entityId(packet));
+                }
+                for (final int id : ids) {
+                    if (id >= 0) {
+                        final List<String> l = seenByB.computeIfAbsent(id, k -> new ArrayList<>());
+                        if (l.size() < 10) {
+                            l.add(stage[0] + ":" + helper.getTick() + ":" + packet.getClass().getSimpleName().replace("Clientbound", "").replace("Packet", ""));
+                        }
+                    }
+                }
+            }
             switch (stage[0]) {
                 case 0 -> {
                     addedB.addAll(idsOf(packetsB, ClientboundAddEntityPacket.class));
@@ -167,6 +195,13 @@ final class SwiftTrackerTests {
                     readdedB.addAll(idsOf(packetsB, ClientboundAddEntityPacket.class));
                     last[0] = missing(mobs, m -> tracks(m, b.player()), "cows not tracked by B after it came back")
                         + missing(mobs, m -> readdedB.contains(m.getId()), "cows without a new spawn packet to B");
+                    if (!last[0].isEmpty()) {
+                        final Mob first = mobs.stream().filter(m -> !readdedB.contains(m.getId())).findFirst().orElse(null);
+                        if (first != null) {
+                            last[0] += "\n  first such cow " + first.getId() + " at " + first.blockPosition().toShortString() + ", B at " + b.player().blockPosition().toShortString()
+                                + ", B received for it: " + seenByB.getOrDefault(first.getId(), List.of()) + ", B's connection queue " + queued(b.player());
+                        }
+                    }
                     if (last[0].isEmpty()) {
                         stage[0] = 3;
                         LOG.info("[SwiftGameTests] tracker pairs/unpairs: stage 2 done on tick {}", helper.getTick());
