@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const RUN = path.resolve(HERE, '..', '..', 'run-bots')
-const PORT = 25570
+const PORT = 25590
 const MODE = process.argv[2] || 'on'
 const JVM_FLAGS = process.argv.slice(3)
 const sleep = ms => new Promise(r => setTimeout(r, ms))

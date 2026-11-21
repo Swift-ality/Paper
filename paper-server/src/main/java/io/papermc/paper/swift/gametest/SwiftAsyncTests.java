@@ -408,4 +408,51 @@ final class SwiftAsyncTests {
             helper.succeed();
         });
     }
+
+    /**
+     * Entity cramming (max 24): 24 villagers in one block never take cramming damage (each sees 23 others),
+     * 26 do. The helper that recounts distinct entities (for searches that listed one twice during the
+     * parallel phase) counts a list with every entity twice correctly.
+     */
+    static void crammingCounts(final GameTestHelper helper) {
+        final List<Entity> twice = new ArrayList<>();
+        final List<Villager> safe = new ArrayList<>();
+        final List<Villager> crammed = new ArrayList<>();
+        for (int y = 1; y <= 3; y++) {
+            for (final BlockPos wall : List.of(new BlockPos(1, y, 2), new BlockPos(3, y, 2), new BlockPos(2, y, 1), new BlockPos(2, y, 3),
+                new BlockPos(5, y, 2), new BlockPos(7, y, 2), new BlockPos(6, y, 1), new BlockPos(6, y, 3))) {
+                helper.setBlock(wall, Blocks.GLASS);
+            }
+        }
+        watcher(helper);
+        for (int i = 0; i < 24; i++) {
+            safe.add(mob(helper, EntityTypes.VILLAGER, new BlockPos(2, 1, 2)));
+        }
+        for (int i = 0; i < 26; i++) {
+            crammed.add(mob(helper, EntityTypes.VILLAGER, new BlockPos(6, 1, 2)));
+        }
+        twice.addAll(safe);
+        twice.addAll(safe);
+        helper.runAfterDelay(200, () -> {
+            final StringBuilder p = new StringBuilder();
+            final int distinct = SwiftAsync.countDistinctNonPassengers(twice);
+            if (distinct != 24) {
+                p.append("\n  48 entries of 24 villagers counted as ").append(distinct);
+            }
+            final long hurtSafe = safe.stream().filter(v -> v.isRemoved() || v.getHealth() < v.getMaxHealth()).count();
+            final long hurtCrammed = crammed.stream().filter(v -> v.isRemoved() || v.getHealth() < v.getMaxHealth()).count();
+            if (hurtSafe != 0) {
+                p.append("\n  ").append(hurtSafe).append(" of 24 villagers in one block took cramming damage (24 is within the limit)");
+            }
+            if (hurtCrammed == 0) {
+                p.append("\n  26 villagers in one block took no cramming damage in 200 ticks");
+            }
+            SwiftFakePlayer.leaveAll(helper);
+            if (!p.isEmpty()) {
+                helper.fail(Component.literal(p.toString()));
+            } else {
+                helper.succeed();
+            }
+        });
+    }
 }

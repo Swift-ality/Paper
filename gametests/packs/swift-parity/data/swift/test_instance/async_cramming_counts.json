@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:async_cramming_counts",
+  "environment": "swift:day",
+  "structure": "swift:platform",
+  "max_ticks": 300,
+  "setup_ticks": 0,
+  "required": true
+}

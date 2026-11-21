@@ -30,6 +30,7 @@ exception to the "same gameplay" rule and is off by default (see its section).
 | 0045 | Mobs tick on several threads at once (Async-style; **changes tick order**) | off unless `swift.asyncEntities=true` |
 | 0046 | Entity tracker (who sees what, entity packets) runs on several threads | off unless `swift.asyncTracker=true` |
 | 0047 | Mob target searches skip the plugin ally-rule lookup while no plugin uses it | `swift.allyFastPath` |
+| 0048 | Parallel ticking: entity pushes, cramming and entity searches behave like serial ticking | part of `swift.asyncEntities` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -286,6 +287,33 @@ bigger with more mobs in range of each other (see the 20k bench).
 illagers, zombie, villager, iron golem: identical with the shortcut on and off, and the known allies come out
 as allies), `ally_plugin_rule_respected` (a rule added through the API makes a zombie leave villagers alone; it
 catches a missing flag), `ally_zombie_targets_villager` (vanilla targeting still works).
+
+---
+
+## 0048: crowds behave like serial ticking under parallel ticking (`swift-invasive`)
+
+**Found by:** the 20k bench. With parallel ticking, tightly packed villagers died of entity cramming
+("squished too much") about 1.5x as often per tick as on stock Paper. Serial Swift matched stock Paper.
+
+**Cause:** when an entity leaves a chunk section, Moonrise removes it from that section's list by shifting the
+rest of the list down, in place. A search on another thread walking that list at the same moment skips one
+entity (or, across lists, sees one twice). In a crowd that means a pair of mobs does not push apart in that
+tick, so mobs separate less, clump, and pass the cramming limit more often.
+
+**Now (only while parallel ticking is enabled):**
+- during the parallel phase a removal only clears the entity's slot (searches already skip empty slots), and
+  the list is compacted on the main thread right after the phase, keeping the order, so it ends up exactly as
+  in-place removal would have left it. Nothing shifts while other threads read, so every search sees every
+  entity;
+- the push between two mobs (`Entity#push(Entity)`) is recorded and applied on the main thread right after the
+  parallel phase, because the other mob may be writing its own motion on another thread at that moment and
+  one of the two updates would be lost (`-Dswift.asyncEntities.deferPushes=false` turns this part off);
+- before cramming damage, the entities found are recounted without duplicates.
+
+**Result** (2,000 villagers, ~5.5 per block, the same number of ticks): squish deaths in the first 1,200
+ticks: stock Paper 91, Swift serial 103, Swift parallel before the fix 141, with the fix 101 (measured with a
+first version that copied the list on every removal; that was too slow in 20k crowds, so it was replaced by
+the clear-then-compact removal above, which needs no copying).
 
 ---
 

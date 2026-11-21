@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 00:10:25 +0100
+Subject: [PATCH] Swift: Entity pushes, cramming and entity searches stay
+ consistent during parallel ticking
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
+index 7d9b040b4784be83fee7a5dd55fad74a941bddc8..65f1159158341d9214dcec1891b640ef0f1fbcd4 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
+@@ -425,6 +425,7 @@ public final class ChunkEntitySlices {
+ 
+         private E[] storage;
+         private int size;
++        private int swift$tombstones; // Swift - async entities: slots cleared during the parallel phase, compacted after it
+ 
+         public BasicEntityList() {
+             this(0);
+@@ -435,7 +436,7 @@ public final class ChunkEntitySlices {
+         }
+ 
+         public boolean isEmpty() {
+-            return this.size == 0;
++            return this.size - this.swift$tombstones == 0; // Swift - async entities: cleared slots do not count
+         }
+ 
+         public int size() {
+@@ -473,6 +474,25 @@ public final class ChunkEntitySlices {
+         }
+ 
+         public boolean remove(final E entity) {
++            // Swift start - async entities: during the parallel phase only clear the slot. Searches on other threads
++            // may be walking this array; shifting it in place would make them skip an entity (pairs not pushing
++            // apart, mobs clumping and cramming). The list is compacted, in order, right after the phase, so it
++            // ends up exactly as in-place removal would leave it. All removals run under SwiftAsync.LOCK.
++            if (io.papermc.paper.swift.async.SwiftAsync.parallel) {
++                final int idx = this.indexOf(entity);
++                if (idx == -1) {
++                    return false;
++                }
++                this.storage[idx] = null;
++                if (this.swift$tombstones++ == 0) {
++                    io.papermc.paper.swift.async.SwiftAsync.compactAfterPhase(this::swift$compact);
++                }
++                return true;
++            }
++            if (this.swift$tombstones != 0) {
++                this.swift$compact();
++            }
++            // Swift end - async entities
+             final int idx = this.indexOf(entity);
+             if (idx == -1) {
+                 return false;
+@@ -489,6 +509,27 @@ public final class ChunkEntitySlices {
+             return true;
+         }
+ 
++        // Swift start - async entities: drop the slots cleared during the parallel phase, keeping the order
++        private void swift$compact() {
++            if (this.swift$tombstones == 0) {
++                return;
++            }
++            final E[] storage = this.storage;
++            int to = 0;
++            for (int from = 0, len = this.size; from < len; ++from) {
++                final E entity = storage[from];
++                if (entity != null) {
++                    storage[to++] = entity;
++                }
++            }
++            for (int i = to; i < this.size; ++i) {
++                storage[i] = null;
++            }
++            this.size = to;
++            this.swift$tombstones = 0;
++        }
++        // Swift end - async entities
++
+         public boolean has(final E entity) {
+             return this.indexOf(entity) != -1;
+         }
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index efb135ccfe79e3b9ca54240ddb4da5cc4fa1a457..0d8546e9a9f559214789c0bdbca821d465b0f413 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -2473,6 +2473,18 @@ public abstract class Entity
+                     za *= pow;
+                     xa *= 0.05F;
+                     za *= 0.05F;
++                    // Swift start - async entities: during parallel ticking the other entity may be ticking on another
++                    // thread and writing its own motion; collect both halves and apply them after the phase, so none is lost
++                    if (io.papermc.paper.swift.async.SwiftAsync.parallel && io.papermc.paper.swift.async.SwiftAsync.deferPushes) {
++                        if (!this.isVehicle() && this.isPushable()) {
++                            io.papermc.paper.swift.async.SwiftAsync.deferPush(this, -xa, -za);
++                        }
++                        if (!entity.isVehicle() && entity.isPushable()) {
++                            io.papermc.paper.swift.async.SwiftAsync.deferPush(entity, xa, za);
++                        }
++                        return;
++                    }
++                    // Swift end - async entities
+                     if (!this.isVehicle() && this.isPushable()) {
+                         this.push(-xa, 0.0, -za);
+                     }
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index f5c999d5fb3870facae5a998fc758700e5a9b474..9fb1fdaa482ebbc3620cadb2b6eab1b29ae3f9f6 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -3923,6 +3923,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                         }
+                     }
+ 
++                    if (count > maxCramming - 1 && io.papermc.paper.swift.async.SwiftAsync.parallel) { // Swift - async entities: a search racing an entity's move to another chunk can list it twice
++                        count = io.papermc.paper.swift.async.SwiftAsync.countDistinctNonPassengers(pushableEntities); // Swift - async entities
++                    } // Swift - async entities
+                     if (count > maxCramming - 1) {
+                         this.hurtServer(serverLevel, this.damageSources().cramming(), 6.0F);
+                     }

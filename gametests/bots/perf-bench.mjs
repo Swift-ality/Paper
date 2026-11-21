@@ -26,7 +26,8 @@ const MODES = {
   parallel: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true'],
   // stock Paper (run-bench/paper-upstream.jar, built from the commit the fork branched from) vs the fork with everything on
   paper: [],
-  fork: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true']
+  fork: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true'],
+  nodefer: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.asyncEntities.deferPushes=false']
 }
 const JARS = { paper: 'paper-upstream.jar' }
 const WARMUP_S = Number(process.env.WARMUP_S || 45)
@@ -129,7 +130,9 @@ async function runMode (mode) {
   await command(proc, SCENARIO === 'farm' ? 'time set noon' : 'time set midnight')
   await command(proc, 'gamemode spectator Bench')
   await command(proc, 'tp Bench 0 -50 0')
-  const R = SCENARIO === 'huge' ? 30 : 22
+  // dense: 2000 villagers in a 19x19 pen, the same ~5.5 per block as the villager half of 'huge', but light
+  // enough that every server holds 20 TPS, so each runs the same number of ticks (fair for counting deaths)
+  const R = SCENARIO === 'huge' ? 30 : SCENARIO === 'dense' ? 9 : 22
   for (let y = -60; y <= -58; y++) {
     await command(proc, `fill ${-R - 1} ${y} ${-R - 1} ${R + 1} ${y} ${-R - 1} glass`, 50)
     await command(proc, `fill ${-R - 1} ${y} ${R + 1} ${R + 1} ${y} ${R + 1} glass`, 50)
@@ -141,6 +144,7 @@ async function runMode (mode) {
   }
   const plan = SCENARIO === 'zombies' ? [['zombie', 3000]]
     : SCENARIO === 'huge' ? [['zombie', 10000], ['villager', 10000]]
+    : SCENARIO === 'dense' ? [['villager', 2000]]
     : [['villager', 400], ['cow', 300], ['sheep', 300], ['pig', 200], ['chicken', 200]]
   let n = 0
   for (const [type, count] of plan) {

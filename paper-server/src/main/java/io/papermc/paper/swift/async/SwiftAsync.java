@@ -216,6 +216,96 @@ public final class SwiftAsync {
         return Thread.currentThread() == mainThread && SERVING.get();
     }
 
+    // ------------------------------------------------------------------ deferred list compaction
+
+    private static final ArrayList<Runnable> COMPACT_AFTER_PHASE = new ArrayList<>();
+
+    /** Moonrise entity lists with slots cleared during the phase; called under {@link #LOCK} (all removals are). */
+    public static void compactAfterPhase(final Runnable compact) {
+        COMPACT_AFTER_PHASE.add(compact);
+    }
+
+    private static void compactLists() {
+        for (int i = 0, len = COMPACT_AFTER_PHASE.size(); i < len; i++) {
+            COMPACT_AFTER_PHASE.get(i).run();
+        }
+        COMPACT_AFTER_PHASE.clear();
+    }
+
+    // ------------------------------------------------------------------ deferred entity pushes
+
+    /** One thread's pushes recorded during the parallel phase: entity, dx, dz triples. */
+    private static final class PushBuffer {
+        final ArrayList<Entity> entities = new ArrayList<>();
+        double[] motion = new double[64];
+        int size;
+
+        void add(final Entity entity, final double dx, final double dz) {
+            if (this.size * 2 + 2 > this.motion.length) {
+                this.motion = Arrays.copyOf(this.motion, this.motion.length * 2);
+            }
+            this.entities.add(entity);
+            this.motion[this.size * 2] = dx;
+            this.motion[this.size * 2 + 1] = dz;
+            this.size++;
+        }
+    }
+
+    private static final ConcurrentLinkedQueue<PushBuffer> PUSH_BUFFERS = new ConcurrentLinkedQueue<>();
+    private static final ThreadLocal<PushBuffer> PUSH_BUFFER = ThreadLocal.withInitial(() -> {
+        final PushBuffer buffer = new PushBuffer();
+        PUSH_BUFFERS.add(buffer);
+        return buffer;
+    });
+    public static final AtomicLong DEFERRED_PUSHES = new AtomicLong();
+    /** {@code -Dswift.asyncEntities.deferPushes=false} applies entity pushes directly even in the parallel phase. */
+    public static volatile boolean deferPushes = Boolean.parseBoolean(System.getProperty("swift.asyncEntities.deferPushes", "true"));
+
+    /**
+     * Records one half of an entity-to-entity push ({@code Entity#push(Entity)}) during the parallel phase. The
+     * pushed entity may be ticking on another thread, writing its own motion; a direct read-add-write from here
+     * would lose one of the two updates, so entities would separate less and cram together. Applied on the main
+     * thread by {@link #applyDeferredPushes} right after the phase.
+     */
+    public static void deferPush(final Entity entity, final double dx, final double dz) {
+        PUSH_BUFFER.get().add(entity, dx, dz);
+    }
+
+    /** Main thread, after the parallel phase: applies the recorded pushes (each thread's in its order). */
+    public static void applyDeferredPushes() {
+        long applied = 0;
+        for (final PushBuffer buffer : PUSH_BUFFERS) {
+            for (int i = 0; i < buffer.size; i++) {
+                final Entity entity = buffer.entities.get(i);
+                if (!entity.isRemoved()) {
+                    entity.push(buffer.motion[i * 2], 0.0, buffer.motion[i * 2 + 1]);
+                }
+            }
+            applied += buffer.size;
+            buffer.entities.clear();
+            buffer.size = 0;
+        }
+        if (applied > 0) {
+            DEFERRED_PUSHES.addAndGet(applied);
+        }
+    }
+
+    /**
+     * Number of distinct non-passenger entities in {@code entities}. During the parallel phase an entity search
+     * can list an entity twice (it moved to another chunk or section while the search walked them); entity
+     * cramming counts the search result, so a duplicate could deal cramming damage a serial tick never would.
+     */
+    public static int countDistinctNonPassengers(final List<? extends Entity> entities) {
+        final java.util.Set<Entity> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>(entities.size() * 2));
+        int count = 0;
+        for (final Entity entity : entities) {
+            if (!entity.isPassenger() && seen.add(entity)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     /**
      * {@code list.sort(comparingDouble(body::distanceToSqr))} with every distance measured once first. Other
      * threads move entities during the sort, and a comparator whose answers change breaks TimSort ("Comparison
@@ -331,6 +421,7 @@ public final class SwiftAsync {
         }
 
         runTasks(buildTasks(parallelEntities, tickOne));
+        applyDeferredPushes();
         PARALLEL_TICKS.incrementAndGet();
         PARALLEL_ENTITY_TICKS.addAndGet(parallelEntities.size());
         SYNC_ENTITY_TICKS.addAndGet(syncEntities.size());
@@ -381,6 +472,7 @@ public final class SwiftAsync {
             serveMainRequests();
         } finally {
             parallel = false;
+            compactLists();
         }
     }
 
