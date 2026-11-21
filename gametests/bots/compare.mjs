@@ -11,7 +11,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const RUN = path.resolve(HERE, '..', '..', 'run-bots')
 const OFF = [
   '-Dswift.selectorIndex=false', '-Dswift.selectorTagIndex=false', '-Dswift.nbtKeyFilter=false', '-Dswift.flatBrainLoop=false',
-  '-Dswift.poiSearchBitset=false', '-Dswift.poiRetain=false', '-Dswift.poiEmptySearchCache=false', '-Dswift.spawnCostSkip=false', '-Dswift.allyFastPath=false'
+  '-Dswift.poiSearchBitset=false', '-Dswift.poiRetain=false', '-Dswift.poiEmptySearchCache=false', '-Dswift.spawnCostSkip=false', '-Dswift.allyFastPath=false -Dswift.nearestFirstLineOfSight=false'
 ]
 
 for (const [mode, flags] of [['on', []], ['off', OFF]]) {

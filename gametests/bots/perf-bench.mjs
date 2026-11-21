@@ -27,7 +27,8 @@ const MODES = {
   // stock Paper (run-bench/paper-upstream.jar, built from the commit the fork branched from) vs the fork with everything on
   paper: [],
   fork: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true'],
-  nodefer: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.asyncEntities.deferPushes=false']
+  nodefer: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.asyncEntities.deferPushes=false'],
+  nolos: ['-Dswift.asyncEntities=true', '-Dswift.asyncTracker=true', '-Dswift.nearestFirstLineOfSight=false']
 }
 const JARS = { paper: 'paper-upstream.jar' }
 const WARMUP_S = Number(process.env.WARMUP_S || 45)

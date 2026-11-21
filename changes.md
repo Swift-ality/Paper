@@ -31,6 +31,7 @@ exception to the "same gameplay" rule and is off by default (see its section).
 | 0046 | Entity tracker (who sees what, entity packets) runs on several threads | off unless `swift.asyncTracker=true` |
 | 0047 | Mob target searches skip the plugin ally-rule lookup while no plugin uses it | `swift.allyFastPath` |
 | 0048 | Parallel ticking: entity pushes, cramming and entity searches behave like serial ticking | part of `swift.asyncEntities` |
+| 0049 | Nearest-target searches trace line of sight nearest-first | `swift.nearestFirstLineOfSight` |
 
 The numbers below come from spark profiles of real servers (ms of main-thread time per tick) and from
 benchmarks in the test suite.
@@ -314,6 +315,41 @@ tick, so mobs separate less, clump, and pass the cramming limit more often.
 ticks: stock Paper 91, Swift serial 103, Swift parallel before the fix 141, with the fix 101 (measured with a
 first version that copied the list on every removal; that was too slow in 20k crowds, so it was replaced by
 the clear-then-compact removal above, which needs no copying).
+
+---
+
+## 0049: nearest-target searches trace line of sight nearest-first (`swift-invasive`)
+
+**Before:** when a mob looks for the nearest thing to attack or flee from (`NearestAttackableTargetGoal` for
+zombies, skeletons, golems, wolves ..., avoid-entity goals, `getNearestPlayer`), every candidate in range went
+through the full targeting check, including a line-of-sight ray trace, and only then was the nearest passing
+one kept. The ray is the expensive part: a zombie next to a village traced a ray to every villager within 35
+blocks. In the 20k profile these rays were a third of all entity work (1.27 s of worker time per tick).
+
+**Now:** every check except the ray still runs on every candidate, in the same order (they have no side
+effects). Then rays are traced to the 4 nearest survivors first, nearest-first, with ties going to the earlier
+one in the list, exactly as the vanilla loop prefers. The first one that is visible is the entity vanilla
+returns, and the rays to farther candidates are skipped. If those 4 are all hidden (a wall in the way), the
+rest are traced in list order, skipping any candidate farther than the best visible one so far. When nothing
+is visible, every ray is still traced, as before.
+
+**Only difference:** a mob caches its line-of-sight answers for one tick. Skipped candidates are not in that
+cache, so if the same mob checks one of them again later in the same tick, it traces a fresh ray. That gives
+the same answer unless a block on that ray changed in between, within that one tick.
+`-Dswift.verify=true` runs the vanilla loop as well (filling the cache exactly as vanilla does), uses its
+answer and reports any difference.
+
+**Gain:** 150 zombies searching 150 villagers in sight: 2.15x (`bench_los_nearest_target`); behind glass
+(nothing visible, every ray still needed): 1.02x, so no loss. The 20k bench has a glass wall between zombies and
+villagers, so nothing is visible and it does not gain (356 ms/tick with the switch off, 370-402 with it on,
+within run-to-run noise). The gain is where targets are in view: zombies near a village, skeletons near
+players, golems near monsters.
+
+**Tests:** `los_differential` (40 random layouts of zombies, skeletons, villagers (some invisible, some on
+exactly equal distances), golems and fake players among random glass pillars; list, tag and nearest-player
+searches with combat, non-combat, short-range and selector conditions: 7,680 searches, identical with the fast
+path on and off), `los_zombie_targets_visible_villager` (a zombie ignores a nearer villager behind glass and
+targets the visible one).
 
 ---
 

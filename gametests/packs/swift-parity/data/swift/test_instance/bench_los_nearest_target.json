@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:function",
+  "function": "swift:bench_los_nearest_target",
+  "environment": "swift:default",
+  "structure": "swift:platform",
+  "max_ticks": 300,
+  "setup_ticks": 0,
+  "required": false
+}

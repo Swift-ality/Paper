@@ -39,6 +39,8 @@ public final class SwiftConfig {
             List.of("Natural spawning skips biome lookups that can only say \"no cost\" (patch 0044).")),
         new Option("optimizations.ally-fast-path", "swift.allyFastPath", true,
             List.of("Mob target searches skip the plugin ally-rule lookup while no plugin has added an ally rule (patch 0047).")),
+        new Option("optimizations.nearest-first-line-of-sight", "swift.nearestFirstLineOfSight", true,
+            List.of("Nearest-target searches trace line of sight nearest-first and stop at the first visible target (patch 0049).")),
         // parallel entity ticking
         new Option("parallel-entity-ticking.enabled", "swift.asyncEntities", false,
             List.of("Tick mobs on several threads at once, like the Async mod (patch 0045).",

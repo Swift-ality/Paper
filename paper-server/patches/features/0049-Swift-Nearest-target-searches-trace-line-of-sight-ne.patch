@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swiftality <155652101+Swift-ality@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 03:42:22 +0100
+Subject: [PATCH] Swift: Nearest-target searches trace line of sight
+ nearest-first
+
+
+diff --git a/net/minecraft/server/level/ServerEntityGetter.java b/net/minecraft/server/level/ServerEntityGetter.java
+index cc6f4e2845ef1e95c765d65f17c8aa1b06652927..3a1c4e35cc916abcbe08ec43b85917bd1c66fb22 100644
+--- a/net/minecraft/server/level/ServerEntityGetter.java
++++ b/net/minecraft/server/level/ServerEntityGetter.java
+@@ -50,6 +50,11 @@ public interface ServerEntityGetter extends EntityGetter {
+         final double z,
+         final AABB bb
+     ) {
++        // Swift start - nearest target line of sight
++        if (io.papermc.paper.swift.entity.SwiftTargeting.enabled && targetConditions.swift$checksLineOfSight(source)) {
++            return io.papermc.paper.swift.entity.SwiftTargeting.nearest(this.getLevel(), this.getEntitiesOfClass(LivingEntity.class, bb, e -> e.is(tag)), targetConditions, source, x, y, z);
++        }
++        // Swift end - nearest target line of sight
+         double bestDistance = Double.MAX_VALUE;
+         LivingEntity nearestEntity = null;
+ 
+@@ -89,6 +94,11 @@ public interface ServerEntityGetter extends EntityGetter {
+         final double y,
+         final double z
+     ) {
++        // Swift start - nearest target line of sight
++        if (io.papermc.paper.swift.entity.SwiftTargeting.enabled && targetConditions.swift$checksLineOfSight(source)) {
++            return io.papermc.paper.swift.entity.SwiftTargeting.nearest(this.getLevel(), entities, targetConditions, source, x, y, z);
++        }
++        // Swift end - nearest target line of sight
+         double best = -1.0;
+         T result = null;
+ 
+diff --git a/net/minecraft/world/entity/ai/targeting/TargetingConditions.java b/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
+index bd6d9fdeb468428bdf35e888be141293088228a4..6b225d61923dd08296459dbc6017c001c0aa4a38 100644
+--- a/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
++++ b/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
+@@ -57,6 +57,16 @@ public class TargetingConditions {
+     }
+ 
+     public boolean test(final ServerLevel level, final @Nullable LivingEntity targeter, final LivingEntity target) {
++        return this.swift$test(level, targeter, target, true); // Swift - nearest target line of sight
++    }
++
++    // Swift start - nearest target line of sight: does test() trace a line of sight from this targeter?
++    public boolean swift$checksLineOfSight(final @Nullable LivingEntity targeter) {
++        return this.checkLineOfSight && targeter instanceof Mob;
++    }
++    // Swift end - nearest target line of sight
++
++    public boolean swift$test(final ServerLevel level, final @Nullable LivingEntity targeter, final LivingEntity target, final boolean lineOfSight) { // Swift - nearest target line of sight: lineOfSight=false runs every check except the line-of-sight trace
+         if (targeter == target) {
+             return false;
+         }
+@@ -87,7 +97,7 @@ public class TargetingConditions {
+                 }
+             }
+ 
+-            if (this.checkLineOfSight && targeter instanceof Mob mob && !mob.getSensing().hasLineOfSight(target)) {
++            if (lineOfSight && this.checkLineOfSight && targeter instanceof Mob mob && !mob.getSensing().hasLineOfSight(target)) { // Swift - nearest target line of sight
+                 return false;
+             }
+         }
