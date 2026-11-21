@@ -131,6 +131,8 @@ final class SwiftAsyncTests {
         final String p = problems.get();
         SwiftFakePlayer.leaveAll(helper);
         if (!p.isEmpty()) {
+            // one line, so the reason survives log filters that only keep the FAIL line
+            LOG.error("[SwiftGameTests] async test problems: {}", p.strip().replace("\n  ", " | "));
             helper.fail(Component.literal(p));
         } else {
             helper.succeed();
@@ -216,10 +218,18 @@ final class SwiftAsyncTests {
      * 16 cows (goal-based breeding) and 16 goats (brain-based breeding), all in love. Once nobody is in love
      * any more, every breeding made one baby, or two: vanilla itself sometimes gives twins, because a goal
      * only re-checks its partner every other tick, so both parents can breed. So babies lie between half the
-     * adults that bred and all of them; anything else is a lost or duplicated birth.
+     * adults that bred and all of them; anything else is a lost or duplicated birth. Cows and goats are kept
+     * apart by glass: goats ram cows, and the damage ends a cow's love mode. An adult whose love ends without
+     * breeding is logged with its state.
      */
     static void breedingOneChildPerPair(final GameTestHelper helper) {
         walls(helper);
+        // goats ram nearby mobs, and any damage ends love mode: a glass wall keeps them away from the cows
+        for (int y = 1; y <= 3; y++) {
+            for (int x = 1; x <= 7; x++) {
+                helper.setBlock(new BlockPos(x, y, 4), Blocks.GLASS);
+            }
+        }
         watcher(helper);
         final long workersBefore = workerTicks();
         final List<Animal> adults = new ArrayList<>();
@@ -231,6 +241,25 @@ final class SwiftAsyncTests {
             adults.add(cow);
             adults.add(goat);
         }
+        // diagnostics: an adult whose love ends without breeding (age still 0) is recorded with its state
+        final Map<Animal, Integer> lastLove = new HashMap<>();
+        final List<String> lost = new ArrayList<>();
+        helper.onEachTick(() -> {
+            for (final Animal a : adults) {
+                final int love = a.isRemoved() ? 0 : a.getInLoveTime();
+                final Integer before = lastLove.put(a, love);
+                if (before != null && before > 0 && love == 0 && a.getAge() == 0) {
+                    final double partner = adults.stream().filter(b -> b != a && b.getType() == a.getType() && b.isInLove())
+                        .mapToDouble(a::distanceTo).min().orElse(-1);
+                    final String s = a.getType().toShortString() + " " + a.getId() + " lost love at tick " + helper.getTick() + " (had " + before
+                        + "): removed " + a.isRemoved() + ", health " + a.getHealth() + ", last damage " + a.getLastDamageSource()
+                        + ", at " + helper.relativeVec(a.position()) + ", nearest in-love partner " + String.format("%.1f", partner)
+                        + ", navigation done " + a.getNavigation().isDone();
+                    lost.add(s);
+                    LOG.info("[SwiftGameTests] async breeding: {}", s);
+                }
+            }
+        });
         helper.succeedWhen(() -> {
             final Map<EntityType<?>, Integer> babies = new HashMap<>();
             for (final Entity e : entitiesInTest(helper)) {
@@ -247,7 +276,7 @@ final class SwiftAsyncTests {
                 final int born = babies.getOrDefault(type, 0);
                 // every breeding makes one baby and marks both parents; twins mean both parents bred
                 helper.assertTrue(born <= bred && born * 2 >= bred, Component.literal(type + ": " + bred + " adults bred, " + born + " babies"));
-                helper.assertTrue(bred >= 12, Component.literal(type + ": only " + bred + "/16 adults bred: the test proves little"));
+                helper.assertTrue(bred >= 12, Component.literal(type + ": only " + bred + "/16 adults bred: the test proves little" + (lost.isEmpty() ? "" : "\n  " + String.join("\n  ", lost))));
             }
             assertWorkersRan(helper, workersBefore);
             LOG.info("[SwiftGameTests] async breeding: {} calves, {} goat kids from 16 adults each", calves, kids);
